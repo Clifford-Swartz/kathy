@@ -1,0 +1,245 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Facility · Kathy</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div class="container">
+    <header class="topbar">
+      <div class="brand">Kathy<small>CCRC Research Library</small></div>
+      <nav class="nav">
+        <a href="/">← Library</a>
+        <a href="/compare">Compare</a>
+      </nav>
+    </header>
+
+    <div id="view"><div class="loading-state"><span class="spinner"></span>Loading…</div></div>
+  </div>
+
+  <script src="/app.js"></script>
+  <script>
+    const view = document.getElementById('view');
+    const id = new URLSearchParams(location.search).get('id');
+    if (!id) { view.innerHTML = '<div class="empty">No facility id.</div>'; }
+
+    let currentFac = null;
+    let notesTimer = null;
+
+    async function load() {
+      try {
+        const f = await api.get(id);
+        currentFac = f;
+        render(f);
+        if (f.status === 'pending') setTimeout(load, 2500);
+      } catch (e) {
+        view.innerHTML = '<div class="empty">Facility not found.</div>';
+      }
+    }
+
+    function scoreClass(s) {
+      if (s == null) return '';
+      if (s >= 70) return 'good';
+      if (s >= 50) return 'warn';
+      return 'bad';
+    }
+
+    function render(f) {
+      if (f.status === 'pending') {
+        view.innerHTML = `
+          <div class="dashboard-header">
+            <div class="meta">
+              <h1>${escapeHtml(f.name)}</h1>
+              <div class="loc">Queued · waiting for Claude</div>
+            </div>
+          </div>
+          <div class="loading-state">
+            <span class="spinner"></span>
+            Claude is researching this facility. This usually takes 30–120 seconds.
+          </div>`;
+        return;
+      }
+
+      if (f.status === 'error') {
+        view.innerHTML = `
+          <div class="dashboard-header">
+            <div class="meta">
+              <h1>${escapeHtml(f.name)}</h1>
+              <div class="loc">Analysis failed</div>
+            </div>
+            <button class="primary" onclick="retry()">Retry</button>
+          </div>
+          <div class="panel">
+            <h3>Error</h3>
+            <p>${escapeHtml(f.error || 'Unknown error')}</p>
+            <h3 style="margin-top:1.5rem">Original input</h3>
+            <pre style="white-space:pre-wrap; font-family:-apple-system,sans-serif; font-size:0.85rem; color:var(--ink-soft)">${escapeHtml(f.rawInput || '')}</pre>
+          </div>`;
+        return;
+      }
+
+      const a = f.analysis || {};
+      const id_ = a.identity || {};
+      const fin = a.financial || {};
+      const con = a.contract || {};
+      const care = a.care_quality || {};
+      const scores = a.scores || {};
+      const npv = a.npv_analysis || {};
+      const dq = scores.deal_quality || {};
+      const es = scores.entity_stability || {};
+
+      view.innerHTML = `
+        <div class="dashboard-header">
+          <div class="meta">
+            <h1>${escapeHtml(id_.name || f.name)}</h1>
+            <div class="loc">
+              ${escapeHtml(id_.location || '—')}
+              ${id_.url ? ` · <a href="${escapeHtml(id_.url)}" target="_blank" rel="noopener">website ↗</a>` : ''}
+              ${id_.operator ? ` · ${escapeHtml(id_.operator)}` : ''}
+              ${id_.parent_org ? ` <span style="color:var(--muted)">(${escapeHtml(id_.parent_org)})</span>` : ''}
+            </div>
+          </div>
+          <div class="big-scores">
+            <div class="big-score">
+              <div class="label">Deal Quality</div>
+              <div class="val ${scoreClass(dq.score)}">${dq.score ?? '—'}</div>
+              <div class="rationale">${escapeHtml(dq.rationale || '')}</div>
+            </div>
+            <div class="big-score">
+              <div class="label">Entity Stability</div>
+              <div class="val ${scoreClass(es.score)}">${es.score ?? '—'}</div>
+              <div class="rationale">${escapeHtml(es.rationale || '')}</div>
+            </div>
+          </div>
+        </div>
+
+        ${a.narrative ? `
+          <div class="panel">
+            <h3>Analyst narrative</h3>
+            <div class="narrative">${escapeHtml(a.narrative).replace(/\n\n/g, '</p><p>').replace(/^/, '<p>').replace(/$/, '</p>')}</div>
+          </div>` : ''}
+
+        <div class="panel">
+          <h2>Contract</h2>
+          <div class="kv">
+            <div class="k">Type</div><div class="v">${escapeHtml(con.type || '—')}</div>
+            <div class="k">Summary</div><div class="v" style="text-align:left">${escapeHtml(con.summary || '—')}</div>
+          </div>
+          ${(con.what_is_covered?.length || con.what_is_not_covered?.length) ? `
+            <div style="display:grid; grid-template-columns:1fr 1fr; gap:2rem; margin-top:1.25rem">
+              <div>
+                <h3>Covered</h3>
+                <ul style="font-family:-apple-system,sans-serif; font-size:0.9rem; padding-left:1.1rem; color:var(--ink-soft)">
+                  ${(con.what_is_covered || []).map(s => `<li>${escapeHtml(s)}</li>`).join('')}
+                </ul>
+              </div>
+              <div>
+                <h3>Not covered</h3>
+                <ul style="font-family:-apple-system,sans-serif; font-size:0.9rem; padding-left:1.1rem; color:var(--ink-soft)">
+                  ${(con.what_is_not_covered || []).map(s => `<li>${escapeHtml(s)}</li>`).join('')}
+                </ul>
+              </div>
+            </div>` : ''}
+        </div>
+
+        <div class="panel">
+          <h2>Financial snapshot</h2>
+          <div class="kv">
+            <div class="k">Entrance fee</div><div class="v">${fmtRange(fin.entrance_fee_low, fin.entrance_fee_high)}</div>
+            <div class="k">Refundable</div><div class="v">${fin.refundable_pct == null ? '—' : fin.refundable_pct + '%'}</div>
+            <div class="k">Monthly fee</div><div class="v">${fmtRange(fin.monthly_fee_low, fin.monthly_fee_high)}</div>
+            <div class="k">Occupancy</div><div class="v">${fin.occupancy_rate == null ? '—' : (fin.occupancy_rate * (fin.occupancy_rate <= 1 ? 100 : 1)).toFixed(1) + '% (' + (fin.occupancy_trend || 'unknown') + ')'}</div>
+            <div class="k">Days cash on hand</div><div class="v">${fmtNum(fin.days_cash_on_hand, 0)}</div>
+            <div class="k">Debt / assets</div><div class="v">${fmtPct(fin.debt_to_asset)}</div>
+            <div class="k">Operating margin</div><div class="v">${fmtPct(fin.operating_margin)}</div>
+            <div class="k">Debt service coverage</div><div class="v">${fmtNum(fin.debt_service_coverage, 2)}x</div>
+          </div>
+          ${fin.fee_escalation_history_pct?.length ? `
+            <h3>Fee escalation history</h3>
+            <div style="font-family:-apple-system,sans-serif; font-size:0.9rem; color:var(--ink-soft)">
+              ${fin.fee_escalation_history_pct.map(p => p.toFixed(1) + '%').join(' · ')}
+            </div>` : ''}
+        </div>
+
+        ${(npv.total_cost_10yr != null || npv.total_cost_20yr != null || npv.notes) ? `
+          <div class="panel">
+            <h2>NPV analysis</h2>
+            <div class="kv">
+              <div class="k">10-year total cost</div><div class="v">${fmtMoney(npv.total_cost_10yr)}</div>
+              <div class="k">20-year total cost</div><div class="v">${fmtMoney(npv.total_cost_20yr)}</div>
+            </div>
+            ${npv.assumptions ? `<h3>Assumptions</h3><p style="font-family:-apple-system,sans-serif; font-size:0.9rem">${escapeHtml(npv.assumptions)}</p>` : ''}
+            ${npv.notes ? `<p style="font-family:-apple-system,sans-serif; font-size:0.9rem; color:var(--ink-soft)">${escapeHtml(npv.notes)}</p>` : ''}
+          </div>` : ''}
+
+        <div class="panel">
+          <h2>Care quality</h2>
+          <div class="kv">
+            <div class="k">Medicare star rating</div><div class="v">${care.medicare_star_rating == null ? '—' : care.medicare_star_rating + ' ★'}</div>
+            <div class="k">CARF accredited</div><div class="v">${care.carf_accredited == null ? '—' : (care.carf_accredited ? 'Yes' : 'No')}</div>
+          </div>
+          ${care.recent_deficiencies?.length ? `
+            <h3>Recent deficiencies</h3>
+            <ul style="font-family:-apple-system,sans-serif; font-size:0.9rem; padding-left:1.1rem; color:var(--ink-soft)">
+              ${care.recent_deficiencies.map(s => `<li>${escapeHtml(s)}</li>`).join('')}
+            </ul>` : ''}
+          ${care.staff_ratio_notes ? `<p style="font-family:-apple-system,sans-serif; font-size:0.9rem">${escapeHtml(care.staff_ratio_notes)}</p>` : ''}
+        </div>
+
+        ${(a.red_flags?.length || a.highlights?.length) ? `
+          <div class="panel">
+            <h2>Red flags &amp; highlights</h2>
+            <div class="flags">
+              ${(a.red_flags || []).map(s => `<div class="flag red">⚑ ${escapeHtml(s)}</div>`).join('')}
+              ${(a.highlights || []).map(s => `<div class="flag green">★ ${escapeHtml(s)}</div>`).join('')}
+            </div>
+          </div>` : ''}
+
+        ${a.unknowns?.length ? `
+          <div class="panel">
+            <h3>Unknowns flagged by the model</h3>
+            <ul style="font-family:-apple-system,sans-serif; font-size:0.88rem; padding-left:1.1rem; color:var(--ink-soft)">
+              ${a.unknowns.map(s => `<li>${escapeHtml(s)}</li>`).join('')}
+            </ul>
+          </div>` : ''}
+
+        <div class="panel notes">
+          <h2>Your notes</h2>
+          <p class="sans" style="font-size:0.8rem; color:var(--muted); margin-top:-0.25rem">Saved automatically</p>
+          <textarea id="notes" placeholder="Thoughts, questions, follow-ups for the book…">${escapeHtml(f.notes || '')}</textarea>
+        </div>
+
+        ${a.sources?.length ? `
+          <div class="panel">
+            <h2>Sources</h2>
+            <ul class="sources" style="padding-left:1.1rem">
+              ${a.sources.map(s => `<li><a href="${escapeHtml(s.url)}" target="_blank" rel="noopener">${escapeHtml(s.title || s.url)}</a></li>`).join('')}
+            </ul>
+          </div>` : ''}
+
+        <div style="text-align:right; margin:1rem 0 3rem">
+          <button class="secondary" onclick="retry()">Re-analyze</button>
+        </div>
+      `;
+
+      const notesEl = document.getElementById('notes');
+      if (notesEl) {
+        notesEl.addEventListener('input', () => {
+          clearTimeout(notesTimer);
+          notesTimer = setTimeout(() => api.saveNotes(id, notesEl.value), 600);
+        });
+      }
+    }
+
+    async function retry() {
+      await fetch('/api/facilities/' + id + '/retry', { method: 'POST' });
+      load();
+    }
+    window.retry = retry;
+
+    load();
+  </script>
+</body>
+</html>

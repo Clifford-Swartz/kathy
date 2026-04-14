@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Kathy · CCRC Analyzer</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div class="container">
+    <header class="topbar">
+      <div class="brand">
+        Kathy
+        <small>CCRC Research Library</small>
+      </div>
+      <nav class="nav">
+        <a href="/">Library</a>
+        <a href="/compare">Compare</a>
+      </nav>
+    </header>
+
+    <section>
+      <h1>Analyze a facility</h1>
+      <p>Paste anything — a CCRC name, a marketing URL, or text from a brochure or annual report. Claude will research it and build a Deal Quality + Entity Stability dashboard.</p>
+
+      <div class="paste-card" style="margin-top:1.25rem">
+        <textarea id="input" placeholder="e.g. 'Kendal at Hanover, Hanover NH' — or paste a brochure, financial disclosure, or URL..."></textarea>
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-top:0.85rem">
+          <p class="hint">Analyses run locally via Claude CLI · Opus 4.6</p>
+          <button id="analyze" class="primary">Analyze →</button>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2 style="display:flex; justify-content:space-between; align-items:baseline">
+        Saved dashboards
+        <span id="count" class="sans" style="font-size:0.8rem; color:var(--muted); font-weight:normal"></span>
+      </h2>
+      <div id="list"></div>
+    </section>
+  </div>
+
+  <script src="/app.js"></script>
+  <script>
+    const list = document.getElementById('list');
+    const count = document.getElementById('count');
+    const input = document.getElementById('input');
+    const btn = document.getElementById('analyze');
+
+    async function refresh() {
+      const facs = await api.list();
+      count.textContent = facs.length ? `${facs.length} facility${facs.length === 1 ? '' : 'ies'}` : '';
+      if (!facs.length) {
+        list.innerHTML = '<div class="empty">No facilities yet. Paste one above to begin.</div>';
+        return;
+      }
+      list.className = 'grid cards';
+      list.innerHTML = facs.map(cardHTML).join('');
+      list.querySelectorAll('[data-delete]').forEach(btn => {
+        btn.onclick = async (e) => {
+          e.preventDefault(); e.stopPropagation();
+          if (!confirm('Delete this facility?')) return;
+          await api.del(btn.dataset.delete);
+          refresh();
+        };
+      });
+    }
+
+    function scoreClass(s) {
+      if (s == null) return '';
+      if (s >= 70) return 'good';
+      if (s >= 50) return 'warn';
+      return 'bad';
+    }
+
+    function cardHTML(f) {
+      const dq = f.dealQuality;
+      const es = f.entityStability;
+      return `
+        <a class="card" href="/facility?id=${f.id}">
+          <span class="status-pill ${f.status}">${f.status}</span>
+          <button class="delete-btn" data-delete="${f.id}" title="Delete">×</button>
+          <div class="name">${escapeHtml(f.name || 'Untitled')}</div>
+          <div class="loc">${escapeHtml(f.location || (f.status === 'pending' ? 'Analyzing…' : '—'))}</div>
+          <div class="scores">
+            <div class="score">
+              <div class="label">Deal Quality</div>
+              <div class="val ${scoreClass(dq)} ${dq == null ? 'pending' : ''}">${dq == null ? '—' : dq}</div>
+            </div>
+            <div class="score">
+              <div class="label">Stability</div>
+              <div class="val ${scoreClass(es)} ${es == null ? 'pending' : ''}">${es == null ? '—' : es}</div>
+            </div>
+          </div>
+        </a>`;
+    }
+
+    btn.onclick = async () => {
+      const text = input.value.trim();
+      if (!text) return input.focus();
+      btn.disabled = true;
+      btn.textContent = 'Queuing…';
+      try {
+        const { id } = await api.create(text);
+        input.value = '';
+        await refresh();
+        // poll this facility until ready
+        pollUntilReady(id);
+      } catch (e) {
+        alert('Failed: ' + e.message);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Analyze →';
+      }
+    };
+
+    async function pollUntilReady(id) {
+      for (let i = 0; i < 180; i++) {
+        await new Promise(r => setTimeout(r, 2000));
+        const f = await api.get(id).catch(() => null);
+        if (!f) return;
+        if (f.status === 'ready' || f.status === 'error') {
+          refresh();
+          return;
+        }
+      }
+    }
+
+    refresh();
+    setInterval(refresh, 5000);
+  </script>
+</body>
+</html>

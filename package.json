@@ -1,0 +1,10 @@
+{
+  "name": "kathy-ccrc-analyzer",
+  "version": "0.1.0",
+  "private": true,
+  "description": "CCRC facility analyzer — companion tool for Kathy's book research. Paste a facility, get a Deal Quality + Entity Stability dashboard.",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  }
+}

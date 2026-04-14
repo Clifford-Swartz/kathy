@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Compare · Kathy</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div class="container">
+    <header class="topbar">
+      <div class="brand">Kathy<small>CCRC Research Library</small></div>
+      <nav class="nav">
+        <a href="/">Library</a>
+        <a href="/compare">Compare</a>
+      </nav>
+    </header>
+
+    <h1>Compare facilities</h1>
+    <p>Select up to four facilities to place side-by-side.</p>
+
+    <div id="picker" class="panel sans" style="margin-top:1.25rem"></div>
+    <div id="table-wrap" style="margin-top:2rem; overflow-x:auto"></div>
+  </div>
+
+  <script src="/app.js"></script>
+  <script>
+    const picker = document.getElementById('picker');
+    const tableWrap = document.getElementById('table-wrap');
+    let all = [];
+    let selected = new Set();
+
+    async function init() {
+      all = (await api.list()).filter(f => f.status === 'ready');
+      if (!all.length) {
+        picker.innerHTML = '<em style="color:var(--muted)">No ready facilities yet.</em>';
+        return;
+      }
+      picker.innerHTML = all.map(f => `
+        <label style="display:inline-flex; align-items:center; gap:0.5rem; margin:0.3rem 1rem 0.3rem 0; cursor:pointer">
+          <input type="checkbox" value="${f.id}" />
+          ${escapeHtml(f.name)}
+        </label>
+      `).join('');
+      picker.querySelectorAll('input').forEach(cb => {
+        cb.onchange = () => {
+          if (cb.checked && selected.size >= 4) { cb.checked = false; return; }
+          if (cb.checked) selected.add(cb.value);
+          else selected.delete(cb.value);
+          renderTable();
+        };
+      });
+    }
+
+    async function renderTable() {
+      if (!selected.size) { tableWrap.innerHTML = ''; return; }
+      const facs = await Promise.all([...selected].map(id => api.get(id)));
+      const rows = [
+        ['Location', f => f.analysis?.identity?.location],
+        ['Contract type', f => f.analysis?.contract?.type],
+        ['Deal Quality', f => f.analysis?.scores?.deal_quality?.score],
+        ['Entity Stability', f => f.analysis?.scores?.entity_stability?.score],
+        ['Entrance fee', f => fmtRange(f.analysis?.financial?.entrance_fee_low, f.analysis?.financial?.entrance_fee_high)],
+        ['Refundable %', f => { const p = f.analysis?.financial?.refundable_pct; return p == null ? '—' : p + '%'; }],
+        ['Monthly fee', f => fmtRange(f.analysis?.financial?.monthly_fee_low, f.analysis?.financial?.monthly_fee_high)],
+        ['Occupancy', f => { const o = f.analysis?.financial?.occupancy_rate; return o == null ? '—' : (o * (o <= 1 ? 100 : 1)).toFixed(1) + '%'; }],
+        ['Days cash on hand', f => fmtNum(f.analysis?.financial?.days_cash_on_hand, 0)],
+        ['Debt / assets', f => fmtPct(f.analysis?.financial?.debt_to_asset)],
+        ['Operating margin', f => fmtPct(f.analysis?.financial?.operating_margin)],
+        ['DSCR', f => { const x = f.analysis?.financial?.debt_service_coverage; return x == null ? '—' : Number(x).toFixed(2) + 'x'; }],
+        ['Medicare stars', f => f.analysis?.care_quality?.medicare_star_rating ?? '—'],
+        ['10-yr NPV cost', f => fmtMoney(f.analysis?.npv_analysis?.total_cost_10yr)],
+        ['20-yr NPV cost', f => fmtMoney(f.analysis?.npv_analysis?.total_cost_20yr)],
+      ];
+      tableWrap.innerHTML = `
+        <table class="compare">
+          <thead>
+            <tr>
+              <th></th>
+              ${facs.map(f => `<th>${escapeHtml(f.analysis?.identity?.name || f.name)}</th>`).join('')}
+            </tr>
+          </thead>
+          <tbody>
+            ${rows.map(([label, fn]) => `
+              <tr>
+                <td class="metric">${label}</td>
+                ${facs.map(f => `<td>${escapeHtml(fn(f) ?? '—')}</td>`).join('')}
+              </tr>`).join('')}
+          </tbody>
+        </table>`;
+    }
+
+    init();
+  </script>
+</body>
+</html>

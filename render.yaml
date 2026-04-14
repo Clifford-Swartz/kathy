@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: kathy-ccrc
+    runtime: node
+    plan: starter
+    region: oregon
+    buildCommand: ""
+    startCommand: node server.js
+    envVars:
+      - key: NODE_VERSION
+        value: 22
+      - key: BRIDGE_TOKEN
+        generateValue: true
+      - key: DATA_DIR
+        value: /var/data
+    disk:
+      name: kathy-data
+      mountPath: /var/data
+      sizeGB: 1
