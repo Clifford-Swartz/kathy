@@ -30,13 +30,47 @@ if (fs.existsSync(envFile)) {
 
 const SITE_URL = (process.env.SITE_URL || '').replace(/\/+$/, '');
 const TOKEN = process.env.BRIDGE_TOKEN || '';
-const CLAUDE_BIN = process.env.CLAUDE_BIN || 'claude';
 const MODEL = process.env.CCRC_MODEL || 'claude-opus-4-6';
 
 if (!SITE_URL || !TOKEN) {
   console.error('Missing SITE_URL or BRIDGE_TOKEN. Set them in env or .env.bridge.');
   process.exit(1);
 }
+
+// Resolve CLAUDE_BIN: use env var if it exists on disk; otherwise fall back to
+// scanning the VS Code extensions folder for the newest installed version.
+// Keeps the bridge working across Claude Code auto-updates.
+function resolveClaudeBin() {
+  const configured = process.env.CLAUDE_BIN;
+  if (configured && configured !== 'claude' && fs.existsSync(configured)) {
+    return configured;
+  }
+  // Try bundled path inside the user's VS Code extensions dir.
+  const home = process.env.USERPROFILE || process.env.HOME;
+  if (home) {
+    const extDir = path.join(home, '.vscode', 'extensions');
+    if (fs.existsSync(extDir)) {
+      const candidates = fs.readdirSync(extDir)
+        .filter((n) => /^anthropic\.claude-code-.+win32-x64$/.test(n))
+        .map((name) => {
+          const m = name.match(/^anthropic\.claude-code-(\d+)\.(\d+)\.(\d+)-/);
+          return { name, version: m ? [+m[1], +m[2], +m[3]] : [0, 0, 0] };
+        })
+        .sort((a, b) => {
+          for (let i = 0; i < 3; i++) if (a.version[i] !== b.version[i]) return b.version[i] - a.version[i];
+          return 0;
+        });
+      for (const c of candidates) {
+        const exe = path.join(extDir, c.name, 'resources', 'native-binary', 'claude.exe');
+        if (fs.existsSync(exe)) return exe;
+      }
+    }
+  }
+  // Last resort: assume `claude` is on PATH.
+  return configured || 'claude';
+}
+
+const CLAUDE_BIN = resolveClaudeBin();
 
 console.log(`[bridge] site: ${SITE_URL}`);
 console.log(`[bridge] model: ${MODEL}  claude bin: ${CLAUDE_BIN}`);
