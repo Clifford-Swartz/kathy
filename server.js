@@ -14,58 +14,282 @@ const BRIDGE_TOKEN = process.env.BRIDGE_TOKEN || '';
 const JOB_TIMEOUT_MS = Number(process.env.JOB_TIMEOUT_MS) || 10 * 60 * 1000;
 
 if (!BRIDGE_TOKEN) {
-  console.warn('\n  ⚠  BRIDGE_TOKEN is not set. The bridge endpoint will reject all connections until you set it.\n');
+  console.warn('\n  ⚠  BRIDGE_TOKEN is not set — /bridge endpoints will reject all traffic.\n');
 }
 
 await fsp.mkdir(DATA_DIR, { recursive: true });
 if (!fs.existsSync(DB_PATH)) await fsp.writeFile(DB_PATH, '{"facilities":[]}');
 
-async function readDB() {
-  return JSON.parse(await fsp.readFile(DB_PATH, 'utf8'));
-}
+async function readDB() { return JSON.parse(await fsp.readFile(DB_PATH, 'utf8')); }
 async function writeDB(db) {
   const tmp = DB_PATH + '.tmp';
   await fsp.writeFile(tmp, JSON.stringify(db, null, 2));
   await fsp.rename(tmp, DB_PATH);
 }
 
-// ---------- Bridge job queue (SSE) ----------
+// ---------- Seed (Option A) ----------
+// 20 well-known CCRCs so the map is never empty on first load. Geocoded
+// lazily by the background geocoder once the server boots.
+const SEED_CCRCS = [
+  { name: 'Kendal at Hanover', city: 'Hanover', state: 'NH' },
+  { name: 'Kendal at Oberlin', city: 'Oberlin', state: 'OH' },
+  { name: 'Kendal-Crosslands Communities', city: 'Kennett Square', state: 'PA' },
+  { name: 'Foulkeways at Gwynedd', city: 'Gwynedd', state: 'PA' },
+  { name: 'RiverWoods Exeter', city: 'Exeter', state: 'NH' },
+  { name: "Mary's Woods", city: 'Lake Oswego', state: 'OR' },
+  { name: 'Riderwood', city: 'Silver Spring', state: 'MD' },
+  { name: 'Charlestown', city: 'Catonsville', state: 'MD' },
+  { name: 'Greenspring', city: 'Springfield', state: 'VA' },
+  { name: 'Goodwin House Alexandria', city: 'Alexandria', state: 'VA' },
+  { name: 'Westminster-Canterbury Richmond', city: 'Richmond', state: 'VA' },
+  { name: 'Westminster-Canterbury on Chesapeake Bay', city: 'Virginia Beach', state: 'VA' },
+  { name: 'Brooksby Village', city: 'Peabody', state: 'MA' },
+  { name: 'Linden Ponds', city: 'Hingham', state: 'MA' },
+  { name: 'Pennswood Village', city: 'Newtown', state: 'PA' },
+  { name: 'Cornwall Manor', city: 'Cornwall', state: 'PA' },
+  { name: 'Carlsbad By The Sea', city: 'Carlsbad', state: 'CA' },
+  { name: 'Vi at La Jolla Village', city: 'La Jolla', state: 'CA' },
+  { name: 'Carol Woods', city: 'Chapel Hill', state: 'NC' },
+  { name: 'Givens Estates', city: 'Asheville', state: 'NC' },
+];
 
-// A single bridge is assumed (just Kathy / you). If a second bridge connects,
-// it replaces the first — the old one will be disconnected.
-let bridge = null; // { res, heartbeat }
-const pendingJobs = new Map(); // jobId -> { prompt, facilityId, resolve, reject, dispatched, timer }
+async function seedIfEmpty() {
+  const db = await readDB();
+  if (db.facilities.length > 0) return;
+  for (const seed of SEED_CCRCS) {
+    db.facilities.push({
+      id: randomUUID(),
+      name: seed.name,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      messages: [],
+      analysis: null,
+      notes: '',
+      source: 'seed',
+      city: seed.city,
+      state: seed.state,
+      lat: null,
+      lon: null,
+    });
+  }
+  await writeDB(db);
+  console.log(`[seed] inserted ${SEED_CCRCS.length} seed facilities`);
+}
+await seedIfEmpty();
+
+// ---------- Geocoder worker ----------
+// Walks the DB looking for facilities with a location but no lat/lon, hits
+// Nominatim (free OpenStreetMap geocoder) at 1 req/sec, saves results.
+async function geocodeOnce(query) {
+  const url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(query)}&format=json&limit=1`;
+  try {
+    const res = await fetch(url, {
+      headers: {
+        'User-Agent': 'kathy-ccrc-analyzer (research tool, https://github.com/Clifford-Swartz/kathy)',
+        'Accept': 'application/json',
+      },
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    if (!Array.isArray(data) || !data.length) return null;
+    return { lat: parseFloat(data[0].lat), lon: parseFloat(data[0].lon) };
+  } catch (err) {
+    console.error('[geocoder] fetch failed:', err.message);
+    return null;
+  }
+}
+
+function geocodeQueryFor(fac) {
+  // Prefer the explicit city/state, fall back to analysis identity.location
+  if (fac.city && fac.state) return `${fac.name}, ${fac.city}, ${fac.state}`;
+  const loc = fac.analysis?.identity?.location;
+  if (loc) return `${fac.name}, ${loc}`;
+  return null;
+}
+
+async function runGeocoderLoop() {
+  // ~1 req/sec = polite to Nominatim's free tier.
+  while (true) {
+    try {
+      const db = await readDB();
+      const target = db.facilities.find((f) => f.lat == null && !f.geocodeFailed && geocodeQueryFor(f));
+      if (!target) { await new Promise((r) => setTimeout(r, 5000)); continue; }
+      const q = geocodeQueryFor(target);
+      const result = await geocodeOnce(q);
+      const db2 = await readDB();
+      const fac = db2.facilities.find((f) => f.id === target.id);
+      if (fac) {
+        if (result) {
+          fac.lat = result.lat;
+          fac.lon = result.lon;
+          console.log(`[geocoder] ${q} → ${result.lat.toFixed(3)}, ${result.lon.toFixed(3)}`);
+        } else {
+          fac.geocodeFailed = true;
+          console.log(`[geocoder] ${q} → no result`);
+        }
+        await writeDB(db2);
+      }
+    } catch (err) {
+      console.error('[geocoder] loop error:', err.message);
+    }
+    await new Promise((r) => setTimeout(r, 1100));
+  }
+}
+runGeocoderLoop();
+
+// ---------- SYSTEM PROMPT ----------
+
+const SYSTEM_PROMPT = `You are a senior research analyst assisting an economics PhD who is writing a book on Continuing Care Retirement Communities (CCRCs / Life Plan Communities). She wants rigorous, quantitative analysis in plain economic language. Respect her expertise.
+
+CRITICAL OPERATING RULE — there is no "later." You are generating a single response right now. If research needs to happen, you MUST invoke WebSearch / WebFetch WITHIN this response, read the results, and then write your final answer. Do NOT say things like "one moment while I gather sources", "I'll research this and get back to you", or "let me pull the latest filings" — either do the search in this turn (silently, as tool calls) and then present results, or state up front that you cannot access the data. Promising work you don't immediately perform is a failure mode.
+
+You operate in three fluid modes; shift between them as the conversation demands:
+
+  1. CONFIRM — Only use this mode when the reference is genuinely ambiguous (e.g., a common name that could match multiple facilities). Ask a single clarifying question and stop. Do NOT use CONFIRM for unambiguous references like "Kendal at Hanover, NH" — go straight to DEEP DIVE.
+
+  2. DEEP DIVE — You HAVE WebSearch and WebFetch and you WILL use them now, in this turn, before writing the dashboard. Work the PRIMARY RESEARCH PLAYBOOK below in order — do not default to generic Google searches when EMMA or a state database would have authoritative data. After you've pulled real data, write a brief narrative summary AND emit the dashboard block. Use null for anything you couldn't find — do not fabricate numbers.
+
+PRIMARY RESEARCH PLAYBOOK — work top to bottom, higher = more authoritative:
+
+  A. EMMA (emma.msrb.org) — the Municipal Securities Rulemaking Board's free public bond-disclosure repository. **THIS IS THE SINGLE MOST IMPORTANT SOURCE FOR CCRC RESEARCH.** Most US nonprofit CCRCs finance via tax-exempt revenue bonds and are required by SEC Rule 15c2-12 to file annual continuing disclosures here. The PDFs contain occupancy by unit type, multi-year occupancy history (3–5 yr tables), DSCR, days cash on hand, debt-to-asset, all bond covenants, and management discussion.
+       • WebSearch: \`site:emma.msrb.org "<facility name>"\` and \`site:emma.msrb.org "<parent organization>"\`
+       • From the issuer page on EMMA, find Continuing Disclosure filings, sort by date, WebFetch the most recent annual financial information PDF.
+       • Extract occupancy by Independent Living / Assisted Living / Skilled Nursing AND historical occupancy.
+
+  B. State CCRC disclosure databases — most states with meaningful CCRC populations require annual filings:
+       • PA — pa.gov insurance department CCRC list
+       • CA — California DSS Continuing Care Contracts Branch
+       • FL — Office of Insurance Regulation continuing care
+       • NH — Insurance Department CCRC filings
+       • VA — Bureau of Insurance CCRC disclosure
+       • TX, NC, GA, OH, IL, MA — similar regulatory databases
+     Search \`<state> CCRC annual disclosure statement\`. These contain audited financials, fee schedules, and occupancy.
+
+  C. ProPublica Nonprofit Explorer (projects.propublica.org/nonprofits) — for the parent organization's Form 990. Useful for parent-level totals, executive comp, consolidated financials.
+
+  D. Facility's own "Financial Information" / "Disclosure" pages — Quaker-affiliated operators (Kendal, Friends Services, Pennswood) and other reputable nonprofits often publish audited statements voluntarily.
+
+  E. CMS Medicare Care Compare (medicare.gov/care-compare) — for the SNF component's star rating, deficiencies, staffing.
+
+  F. News, press releases, ratings agency commentary (Fitch, Moody's, S&P sometimes rate CCRC bonds publicly) — softer signals; useful for trend confirmation and risk flagging.
+
+  3. DISCUSS — Answer follow-up questions, explain metrics in plain econ terms, flag hidden risks, help her think about the facility as BOTH a financial deal for residents AND a going concern. You may update the dashboard at any time in a DISCUSS turn if new information warrants it. If a discussion question requires fresh data, search the web in-turn rather than saying you'd need to look it up.
+
+The two headline questions driving all analysis:
+  • DEAL QUALITY — Is this a good financial deal for a resident buying in? (entrance fee vs. refundability, contract type value, monthly fee trajectory, NPV of lifetime cost vs. peer benchmarks)
+  • ENTITY STABILITY — Is the operating entity financially stable? (days cash on hand, DSCR, operating margin, occupancy trend, parent-org backing, bankruptcy / legal history, recent news)
+
+DASHBOARD FORMAT:
+When you want to create or update the dashboard, include a <dashboard>...</dashboard> block anywhere in your response. Inside it is JSON matching this exact schema. Use null for unknowns — NEVER fabricate numbers. Scores 0–100; penalize missing disclosures honestly.
+
+<dashboard>
+{
+  "identity": { "name": "string", "location": "string", "operator": "string|null", "parent_org": "string|null", "url": "string|null", "year_opened": "number|null" },
+  "contract": { "type": "A (Life Care)|B (Modified)|C (Fee-for-Service)|Rental|Unknown", "summary": "string", "what_is_covered": ["string"], "what_is_not_covered": ["string"] },
+  "financial": {
+    "entrance_fee_low": "number|null", "entrance_fee_high": "number|null", "refundable_pct": "number|null",
+    "monthly_fee_low": "number|null", "monthly_fee_high": "number|null",
+    "fee_escalation_history_pct": "number[]|null",
+    "days_cash_on_hand": "number|null", "debt_to_asset": "number|null", "operating_margin": "number|null", "debt_service_coverage": "number|null",
+    "occupancy_rate": "number|null", "occupancy_trend": "rising|flat|declining|unknown",
+    "occupancy_history": [{ "year": "number", "rate": "number (0-1 or 0-100)", "segment": "overall|IL|AL|SNF|null" }]
+  },
+  "care_quality": { "medicare_star_rating": "number|null", "carf_accredited": "boolean|null", "recent_deficiencies": ["string"], "staff_ratio_notes": "string|null" },
+  "scores": { "deal_quality": { "score": "number", "rationale": "string" }, "entity_stability": { "score": "number", "rationale": "string" } },
+  "red_flags": ["string"], "highlights": ["string"],
+  "npv_analysis": { "assumptions": "string", "total_cost_10yr": "number|null", "total_cost_20yr": "number|null", "notes": "string" },
+  "narrative": "string (2 paragraphs for an economist)",
+  "sources": [{ "title": "string", "url": "string" }],
+  "field_sources": {
+    "// keys are dotted paths into the dashboard, values are the URL the number came from": "",
+    "financial.occupancy_rate": "https://emma.msrb.org/...",
+    "financial.days_cash_on_hand": "https://...",
+    "financial.debt_service_coverage": "https://..."
+  },
+  "unknowns": ["string"]
+}
+</dashboard>
+
+Rules:
+  • Everything OUTSIDE the <dashboard> block is the chat message she reads. Keep it conversational, rigorous, and tight.
+  • Do NOT emit the dashboard in CONFIRM mode.
+  • Do NOT emit the dashboard in DISCUSS turns unless something material has changed — it's expensive noise otherwise.
+  • In DEEP DIVE turns, ALWAYS emit the dashboard and accompany it with a brief human-readable summary of what you found.
+  • Never fabricate numbers. Use null + list it in "unknowns".
+  • For every financial number you populate, add an entry to \`field_sources\` mapping the dotted field path (e.g. \`"financial.occupancy_rate"\`) to the actual URL you got it from. If you have no source, leave the number null. This is non-negotiable — the user is writing a book and needs to footnote everything.
+  • For \`occupancy_history\`, prefer reverse chronological (newest first). Rates can be expressed as 0–1 (0.89) or 0–100 (89) — be consistent within a single response.`;
+
+// ---------- Bridge (desktop) SSE ----------
+
+let bridge = null;
+const pendingJobs = new Map();
+
+// Per-facility browser SSE subscriber sets
+const browserSubs = new Map(); // facilityId -> Set<res>
+// Map jobId -> facilityId -> assistantMessageId (so bridge deltas know where to go)
+const jobRouting = new Map();
+
+function browserFanout(facilityId, event, data) {
+  const subs = browserSubs.get(facilityId);
+  if (!subs) return;
+  const line = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+  for (const res of subs) {
+    try { res.write(line); } catch {}
+  }
+}
 
 function dispatchJob(job) {
   if (!bridge) return false;
   try {
-    bridge.res.write(`event: analyze\ndata: ${JSON.stringify({ jobId: job.jobId, prompt: job.prompt })}\n\n`);
+    if (job.kind === 'discover') {
+      bridge.res.write(`event: discover\ndata: ${JSON.stringify({
+        jobId: job.jobId,
+        prompt: job.prompt,
+      })}\n\n`);
+    } else {
+      bridge.res.write(`event: analyze\ndata: ${JSON.stringify({
+        jobId: job.jobId,
+        systemPrompt: SYSTEM_PROMPT,
+        messages: job.messages,
+      })}\n\n`);
+    }
     job.dispatched = true;
     return true;
-  } catch (err) {
-    console.error('dispatch failed', err);
+  } catch {
     return false;
   }
 }
 
-function enqueueJob(prompt, facilityId) {
+function enqueueJob(messages, facilityId, assistantMessageId) {
   return new Promise((resolve, reject) => {
     const jobId = randomUUID();
-    const job = { jobId, prompt, facilityId, resolve, reject, dispatched: false };
+    const job = { jobId, kind: 'analyze', messages, facilityId, assistantMessageId, resolve, reject, dispatched: false };
     job.timer = setTimeout(() => {
       pendingJobs.delete(jobId);
-      reject(new Error('Job timed out waiting for bridge response'));
+      jobRouting.delete(jobId);
+      reject(new Error('Job timed out waiting for bridge'));
+    }, JOB_TIMEOUT_MS);
+    pendingJobs.set(jobId, job);
+    jobRouting.set(jobId, { facilityId, assistantMessageId });
+    if (bridge) dispatchJob(job);
+  });
+}
+
+function enqueueDiscoverJob(prompt) {
+  return new Promise((resolve, reject) => {
+    const jobId = randomUUID();
+    const job = { jobId, kind: 'discover', prompt, resolve, reject, dispatched: false };
+    job.timer = setTimeout(() => {
+      pendingJobs.delete(jobId);
+      reject(new Error('Discover job timed out'));
     }, JOB_TIMEOUT_MS);
     pendingJobs.set(jobId, job);
     if (bridge) dispatchJob(job);
-    // else: will be dispatched when bridge connects
   });
 }
 
 function flushQueueToBridge() {
-  for (const job of pendingJobs.values()) {
-    if (!job.dispatched) dispatchJob(job);
-  }
+  for (const job of pendingJobs.values()) if (!job.dispatched) dispatchJob(job);
 }
 
 function finishJob(jobId, ok, payload) {
@@ -73,130 +297,190 @@ function finishJob(jobId, ok, payload) {
   if (!job) return;
   clearTimeout(job.timer);
   pendingJobs.delete(jobId);
+  jobRouting.delete(jobId);
   if (ok) job.resolve(payload);
   else job.reject(new Error(payload || 'bridge error'));
 }
 
-// ---------- Analysis ----------
+// ---------- Dashboard parser ----------
 
-const ANALYSIS_PROMPT = (userInput) => `You are a senior financial analyst evaluating a Continuing Care Retirement Community (CCRC / Life Plan Community) for an economist writing a book on the industry. The reader has a PhD in economics; be rigorous and quantitative.
+function parseDashboard(fullText) {
+  // Pull the LAST <dashboard>...</dashboard> block from the assistant's text.
+  const re = /<dashboard>\s*([\s\S]*?)\s*<\/dashboard>/gi;
+  let match, last = null;
+  while ((match = re.exec(fullText)) !== null) last = match[1];
+  if (!last) return { dashboard: null, chatText: fullText.trim() };
 
-Your job: analyze the CCRC described below and return a single JSON object (no markdown, no prose outside the JSON). Use web research if you have tools for it. If a field is unknown, use null and list it under "unknowns" — do not fabricate numbers.
+  // Strip any markdown fences inside
+  let inner = last.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
+  const first = inner.indexOf('{');
+  const end = inner.lastIndexOf('}');
+  let parsed = null;
+  if (first !== -1 && end !== -1) {
+    try { parsed = JSON.parse(inner.slice(first, end + 1)); } catch {}
+  }
 
-Two headline questions drive the analysis:
-  1. DEAL QUALITY — Is this a good financial deal for a resident buying in? (Consider entrance fee vs. refundability, contract type value, monthly fee trajectory, NPV of total lifetime cost vs. peer benchmarks.)
-  2. ENTITY STABILITY — Is the operating entity financially stable? (Days cash on hand, debt service coverage, operating margin, occupancy trend, parent-org backing, bankruptcy / legal history, recent news.)
-
-INPUT FROM THE USER (facility to analyze):
-"""
-${userInput}
-"""
-
-Return EXACTLY this JSON shape:
-{
-  "identity": {
-    "name": string,
-    "location": string,
-    "operator": string | null,
-    "parent_org": string | null,
-    "url": string | null,
-    "year_opened": number | null
-  },
-  "contract": {
-    "type": "A (Life Care)" | "B (Modified)" | "C (Fee-for-Service)" | "Rental" | "Unknown",
-    "summary": string,
-    "what_is_covered": string[],
-    "what_is_not_covered": string[]
-  },
-  "financial": {
-    "entrance_fee_low": number | null,
-    "entrance_fee_high": number | null,
-    "refundable_pct": number | null,
-    "monthly_fee_low": number | null,
-    "monthly_fee_high": number | null,
-    "fee_escalation_history_pct": number[] | null,
-    "days_cash_on_hand": number | null,
-    "debt_to_asset": number | null,
-    "operating_margin": number | null,
-    "debt_service_coverage": number | null,
-    "occupancy_rate": number | null,
-    "occupancy_trend": "rising" | "flat" | "declining" | "unknown"
-  },
-  "care_quality": {
-    "medicare_star_rating": number | null,
-    "carf_accredited": boolean | null,
-    "recent_deficiencies": string[],
-    "staff_ratio_notes": string | null
-  },
-  "scores": {
-    "deal_quality": { "score": number, "rationale": string },
-    "entity_stability": { "score": number, "rationale": string }
-  },
-  "red_flags": string[],
-  "highlights": string[],
-  "npv_analysis": {
-    "assumptions": string,
-    "total_cost_10yr": number | null,
-    "total_cost_20yr": number | null,
-    "notes": string
-  },
-  "narrative": string,
-  "sources": { "title": string, "url": string }[],
-  "unknowns": string[]
+  // Chat text = full minus the dashboard block
+  const chatText = fullText.replace(/<dashboard>[\s\S]*?<\/dashboard>/gi, '').trim();
+  return { dashboard: parsed, chatText };
 }
 
-Scores are 0–100. Be honest — penalize missing disclosures. Narrative should be 2 tight paragraphs written for an economist. Output ONLY the JSON object.`;
+// ---------- Assistant turn ----------
 
-function extractJSON(text) {
-  let inner = text;
+async function runAssistantTurn(facilityId) {
+  const db = await readDB();
+  const fac = db.facilities.find((f) => f.id === facilityId);
+  if (!fac) return;
+
+  const assistantMsg = {
+    id: randomUUID(),
+    role: 'assistant',
+    content: '',
+    ts: new Date().toISOString(),
+    streaming: true,
+  };
+  fac.messages.push(assistantMsg);
+  fac.updatedAt = new Date().toISOString();
+  await writeDB(db);
+
+  browserFanout(facilityId, 'message-start', { messageId: assistantMsg.id });
+
   try {
-    const env = JSON.parse(text);
-    if (env && typeof env === 'object' && typeof env.result === 'string') inner = env.result;
-  } catch {}
-  const fence = inner.match(/```(?:json)?\s*([\s\S]*?)```/);
+    const history = fac.messages.slice(0, -1).map((m) => ({ role: m.role, content: m.content }));
+    const fullText = await enqueueJob(history, facilityId, assistantMsg.id);
+
+    const { dashboard, chatText } = parseDashboard(fullText);
+
+    const db2 = await readDB();
+    const fac2 = db2.facilities.find((f) => f.id === facilityId);
+    const msg = fac2?.messages.find((m) => m.id === assistantMsg.id);
+    if (msg) {
+      msg.content = chatText;
+      msg.streaming = false;
+    }
+    if (dashboard && fac2) {
+      fac2.analysis = dashboard;
+      // If identity includes a name, promote it to the facility name
+      if (dashboard?.identity?.name) fac2.name = dashboard.identity.name;
+    }
+    fac2.updatedAt = new Date().toISOString();
+    await writeDB(db2);
+
+    browserFanout(facilityId, 'message-end', {
+      messageId: assistantMsg.id,
+      content: chatText,
+    });
+    if (dashboard) browserFanout(facilityId, 'dashboard', { analysis: dashboard, name: fac2.name });
+  } catch (err) {
+    console.error('turn failed', facilityId, err.message);
+    const db3 = await readDB();
+    const fac3 = db3.facilities.find((f) => f.id === facilityId);
+    const msg = fac3?.messages.find((m) => m.id === assistantMsg.id);
+    if (msg) {
+      msg.content = `*Analysis failed: ${err.message}*`;
+      msg.streaming = false;
+      msg.error = true;
+    }
+    await writeDB(db3);
+    browserFanout(facilityId, 'message-end', { messageId: assistantMsg.id, content: msg?.content || '', error: true });
+  }
+}
+
+// ---------- Discovery ----------
+
+const DISCOVER_PROMPT = (bounds) => `You are helping research Continuing Care Retirement Communities (CCRCs / Life Plan Communities) in the United States. Your task: identify CCRCs located within the geographic bounding box below. Use WebSearch and WebFetch — do NOT rely on training data alone, and do NOT invent facilities.
+
+BOUNDING BOX (WGS84):
+  South latitude: ${bounds.south}
+  North latitude: ${bounds.north}
+  West longitude: ${bounds.west}
+  East longitude: ${bounds.east}
+  Approximate center: ${((bounds.south + bounds.north) / 2).toFixed(3)}, ${((bounds.west + bounds.east) / 2).toFixed(3)}
+
+Strategy:
+  1. Identify the major US states / regions intersecting this box.
+  2. WebSearch for terms like "CCRC <state>", "Life Plan Communities <region>", "LeadingAge member directory <state>", "<state> insurance department CCRC list".
+  3. Pull a handful of authoritative directories and extract real facility names + addresses.
+  4. Filter out anything outside the bounding box.
+  5. De-duplicate.
+
+Return ONLY this JSON object (no markdown, no prose):
+{
+  "discoveries": [
+    {
+      "name": "facility name",
+      "city": "city",
+      "state": "two-letter state code",
+      "address": "street address if known, else null",
+      "operator": "operator/parent if known, else null",
+      "url": "official website URL if known, else null"
+    }
+  ]
+}
+
+If you find none, return {"discoveries": []}. Quality over quantity — 5 verified facilities are better than 30 invented ones.`;
+
+function parseDiscoveries(text) {
+  // Try fenced code block first, then any { ... } in the text.
+  let inner = text;
+  const fence = inner.match(/\`\`\`(?:json)?\s*([\s\S]*?)\`\`\`/);
   if (fence) inner = fence[1];
   const first = inner.indexOf('{');
   const last = inner.lastIndexOf('}');
-  if (first === -1 || last === -1) throw new Error('No JSON object found in model output');
-  return JSON.parse(inner.slice(first, last + 1));
+  if (first === -1 || last === -1) throw new Error('no JSON in discovery output');
+  const obj = JSON.parse(inner.slice(first, last + 1));
+  return Array.isArray(obj.discoveries) ? obj.discoveries : [];
 }
 
-async function analyzeFacility(id, rawInput) {
-  try {
-    const raw = await enqueueJob(ANALYSIS_PROMPT(rawInput), id);
-    const parsed = extractJSON(raw);
-    const db = await readDB();
-    const fac = db.facilities.find((f) => f.id === id);
-    if (fac) {
-      fac.analysis = parsed;
-      fac.status = 'ready';
-      fac.analyzedAt = new Date().toISOString();
-      fac.name = parsed?.identity?.name || fac.name || 'Untitled facility';
-      fac.error = null;
-      await writeDB(db);
-    }
-  } catch (err) {
-    console.error('analysis failed', id, err.message);
-    const db = await readDB();
-    const fac = db.facilities.find((f) => f.id === id);
-    if (fac) {
-      fac.status = 'error';
-      fac.error = err.message;
-      await writeDB(db);
-    }
+async function runDiscovery(bounds) {
+  console.log(`[discover] bounds N${bounds.north.toFixed(2)} S${bounds.south.toFixed(2)} E${bounds.east.toFixed(2)} W${bounds.west.toFixed(2)}`);
+  const raw = await enqueueDiscoverJob(DISCOVER_PROMPT(bounds));
+  let discoveries = [];
+  try { discoveries = parseDiscoveries(raw); }
+  catch (err) { console.error('[discover] parse failed:', err.message); return; }
+
+  console.log(`[discover] claude returned ${discoveries.length} candidates`);
+  if (!discoveries.length) return;
+
+  const db = await readDB();
+  let added = 0;
+  for (const d of discoveries) {
+    if (!d.name || !d.state) continue;
+    const dup = db.facilities.find(
+      (f) =>
+        f.name?.toLowerCase().trim() === d.name.toLowerCase().trim() &&
+        (f.state || '').toLowerCase() === d.state.toLowerCase()
+    );
+    if (dup) continue;
+    db.facilities.push({
+      id: randomUUID(),
+      name: d.name,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      messages: [],
+      analysis: null,
+      notes: '',
+      source: 'discovered',
+      city: d.city || null,
+      state: d.state || null,
+      address: d.address || null,
+      operator: d.operator || null,
+      url: d.url || null,
+      lat: null,
+      lon: null,
+    });
+    added++;
   }
+  await writeDB(db);
+  console.log(`[discover] added ${added} new facilities (geocoder will resolve coords)`);
 }
 
 // ---------- HTTP ----------
 
 const MIME = {
-  '.html': 'text/html; charset=utf-8',
-  '.js': 'text/javascript; charset=utf-8',
-  '.css': 'text/css; charset=utf-8',
-  '.json': 'application/json; charset=utf-8',
-  '.svg': 'image/svg+xml',
-  '.png': 'image/png',
-  '.ico': 'image/x-icon',
+  '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8', '.json': 'application/json; charset=utf-8',
+  '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon',
 };
 
 function sendJSON(res, status, body, extra = {}) {
@@ -242,11 +526,9 @@ const server = http.createServer(async (req, res) => {
   const { pathname } = url;
 
   try {
-    // ---------- BRIDGE SSE ENDPOINT ----------
+    // ---------- BRIDGE ENDPOINTS ----------
     if (pathname === '/bridge/events' && req.method === 'GET') {
-      if (!BRIDGE_TOKEN || tokenFromReq(req, url) !== BRIDGE_TOKEN) {
-        return sendJSON(res, 401, { error: 'unauthorized' });
-      }
+      if (!BRIDGE_TOKEN || tokenFromReq(req, url) !== BRIDGE_TOKEN) return sendJSON(res, 401, { error: 'unauthorized' });
       res.writeHead(200, {
         'Content-Type': 'text/event-stream',
         'Cache-Control': 'no-cache, no-transform',
@@ -256,16 +538,10 @@ const server = http.createServer(async (req, res) => {
       res.write('retry: 3000\n\n');
       res.write(`event: hello\ndata: ${JSON.stringify({ ts: Date.now() })}\n\n`);
 
-      if (bridge) {
-        try { bridge.res.end(); } catch {}
-        clearInterval(bridge.heartbeat);
-      }
+      if (bridge) { try { bridge.res.end(); } catch {} clearInterval(bridge.heartbeat); }
       bridge = {
         res,
-        heartbeat: setInterval(() => {
-          try { res.write(`event: ping\ndata: {}\n\n`); }
-          catch { cleanup(); }
-        }, 25000),
+        heartbeat: setInterval(() => { try { res.write(`event: ping\ndata: {}\n\n`); } catch { cleanup(); } }, 25000),
       };
       console.log('[bridge] connected');
 
@@ -273,24 +549,29 @@ const server = http.createServer(async (req, res) => {
         if (bridge && bridge.res === res) {
           clearInterval(bridge.heartbeat);
           bridge = null;
-          // Any jobs that had been dispatched but hadn't returned yet
-          // should be re-dispatched when a bridge reconnects.
           for (const job of pendingJobs.values()) job.dispatched = false;
           console.log('[bridge] disconnected');
         }
       };
       req.on('close', cleanup);
       req.on('error', cleanup);
-
-      // Flush any queued jobs to the freshly-connected bridge.
       flushQueueToBridge();
       return;
     }
 
-    if (pathname === '/bridge/result' && req.method === 'POST') {
-      if (!BRIDGE_TOKEN || tokenFromReq(req, url) !== BRIDGE_TOKEN) {
-        return sendJSON(res, 401, { error: 'unauthorized' });
+    if (pathname === '/bridge/delta' && req.method === 'POST') {
+      if (!BRIDGE_TOKEN || tokenFromReq(req, url) !== BRIDGE_TOKEN) return sendJSON(res, 401, { error: 'unauthorized' });
+      const body = await readBody(req);
+      const { jobId, text } = body;
+      const route = jobRouting.get(jobId);
+      if (route && typeof text === 'string') {
+        browserFanout(route.facilityId, 'delta', { messageId: route.assistantMessageId, text });
       }
+      return sendJSON(res, 200, { ok: true });
+    }
+
+    if (pathname === '/bridge/result' && req.method === 'POST') {
+      if (!BRIDGE_TOKEN || tokenFromReq(req, url) !== BRIDGE_TOKEN) return sendJSON(res, 401, { error: 'unauthorized' });
       const body = await readBody(req);
       const { jobId, ok, data, error } = body;
       if (!jobId) return sendJSON(res, 400, { error: 'jobId required' });
@@ -298,41 +579,67 @@ const server = http.createServer(async (req, res) => {
       return sendJSON(res, 200, { ok: true });
     }
 
-    if (pathname === '/bridge/status' && req.method === 'GET') {
-      return sendJSON(res, 200, {
-        connected: !!bridge,
-        pendingJobs: pendingJobs.size,
-      });
-    }
-
     // ---------- APP API ----------
-    if (pathname === '/api/bridge-status' && req.method === 'GET') {
-      return sendJSON(res, 200, { connected: !!bridge });
-    }
 
     if (pathname === '/api/facilities' && req.method === 'GET') {
       const db = await readDB();
-      return sendJSON(res, 200, db.facilities.map(summary));
+      // Library page should not show pure discoveries (no chat, no analysis).
+      const visible = db.facilities.filter(
+        (f) => (f.messages?.length || 0) > 0 || f.analysis
+      );
+      return sendJSON(res, 200, visible.map(summary));
+    }
+
+    if (pathname === '/api/map' && req.method === 'GET') {
+      const db = await readDB();
+      // Map shows everything that has a location (geocoded or pending).
+      return sendJSON(res, 200, db.facilities.map((f) => ({
+        id: f.id,
+        name: f.name,
+        city: f.city,
+        state: f.state,
+        lat: f.lat,
+        lon: f.lon,
+        source: f.source || 'manual',
+        hasChat: (f.messages?.length || 0) > 0,
+        hasDashboard: !!f.analysis,
+        dealQuality: f.analysis?.scores?.deal_quality?.score ?? null,
+        entityStability: f.analysis?.scores?.entity_stability?.score ?? null,
+      })));
+    }
+
+    if (pathname === '/api/discover' && req.method === 'POST') {
+      const body = await readBody(req);
+      const { north, south, east, west } = body || {};
+      if ([north, south, east, west].some((v) => typeof v !== 'number')) {
+        return sendJSON(res, 400, { error: 'bounds (north, south, east, west) required as numbers' });
+      }
+      // Fire-and-forget discovery — return immediately, the response will
+      // appear on the map as it lands.
+      runDiscovery({ north, south, east, west }).catch((err) =>
+        console.error('[discover] failed:', err.message)
+      );
+      return sendJSON(res, 202, { ok: true, queued: true });
     }
 
     if (pathname === '/api/facilities' && req.method === 'POST') {
       const body = await readBody(req);
-      const rawInput = (body.input || '').trim();
-      if (!rawInput) return sendJSON(res, 400, { error: 'input required' });
+      const input = (body.input || '').trim();
+      if (!input) return sendJSON(res, 400, { error: 'input required' });
       const id = randomUUID();
       const db = await readDB();
       const rec = {
         id,
-        name: deriveName(rawInput),
-        rawInput,
-        status: 'pending',
+        name: deriveName(input),
         createdAt: new Date().toISOString(),
-        notes: '',
+        updatedAt: new Date().toISOString(),
+        messages: [{ id: randomUUID(), role: 'user', content: input, ts: new Date().toISOString() }],
         analysis: null,
+        notes: '',
       };
       db.facilities.unshift(rec);
       await writeDB(db);
-      analyzeFacility(id, rawInput); // fire and forget
+      runAssistantTurn(id);
       return sendJSON(res, 201, { id });
     }
 
@@ -359,24 +666,58 @@ const server = http.createServer(async (req, res) => {
       }
     }
 
-    const retryMatch = pathname.match(/^\/api\/facilities\/([\w-]+)\/retry$/);
-    if (retryMatch && req.method === 'POST') {
-      const id = retryMatch[1];
+    const msgMatch = pathname.match(/^\/api\/facilities\/([\w-]+)\/message$/);
+    if (msgMatch && req.method === 'POST') {
+      const id = msgMatch[1];
+      const body = await readBody(req);
+      const content = (body.content || '').trim();
+      if (!content) return sendJSON(res, 400, { error: 'content required' });
       const db = await readDB();
       const fac = db.facilities.find((f) => f.id === id);
       if (!fac) return sendJSON(res, 404, { error: 'not found' });
-      fac.status = 'pending';
-      fac.error = null;
+      const userMsg = { id: randomUUID(), role: 'user', content, ts: new Date().toISOString() };
+      fac.messages.push(userMsg);
+      fac.updatedAt = new Date().toISOString();
       await writeDB(db);
-      analyzeFacility(id, fac.rawInput);
-      return sendJSON(res, 200, { ok: true });
+      browserFanout(id, 'user-message', userMsg);
+      runAssistantTurn(id);
+      return sendJSON(res, 200, { ok: true, message: userMsg });
     }
 
-    // ---------- Pages ----------
+    const streamMatch = pathname.match(/^\/api\/facilities\/([\w-]+)\/stream$/);
+    if (streamMatch && req.method === 'GET') {
+      const id = streamMatch[1];
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache, no-transform',
+        'Connection': 'keep-alive',
+        'X-Accel-Buffering': 'no',
+      });
+      res.write('retry: 3000\n\n');
+      res.write(`event: connected\ndata: {}\n\n`);
+
+      if (!browserSubs.has(id)) browserSubs.set(id, new Set());
+      browserSubs.get(id).add(res);
+
+      const heartbeat = setInterval(() => {
+        try { res.write(`event: ping\ndata: {}\n\n`); } catch { cleanup(); }
+      }, 25000);
+
+      const cleanup = () => {
+        clearInterval(heartbeat);
+        browserSubs.get(id)?.delete(res);
+        if (browserSubs.get(id)?.size === 0) browserSubs.delete(id);
+      };
+      req.on('close', cleanup);
+      req.on('error', cleanup);
+      return;
+    }
+
+    // ---------- Pages & static ----------
     if (pathname === '/' || pathname === '/index.html') return serveStatic(res, 'index.html');
     if (pathname === '/facility' || pathname === '/facility.html') return serveStatic(res, 'facility.html');
     if (pathname === '/compare' || pathname === '/compare.html') return serveStatic(res, 'compare.html');
-
+    if (pathname === '/map' || pathname === '/map.html') return serveStatic(res, 'map.html');
     return serveStatic(res, pathname.slice(1));
   } catch (err) {
     console.error(err);
@@ -386,15 +727,19 @@ const server = http.createServer(async (req, res) => {
 
 function summary(f) {
   const a = f.analysis;
+  const lastMsg = f.messages?.[f.messages.length - 1];
   return {
     id: f.id,
     name: f.name,
-    status: f.status,
     createdAt: f.createdAt,
+    updatedAt: f.updatedAt,
     location: a?.identity?.location || null,
     dealQuality: a?.scores?.deal_quality?.score ?? null,
     entityStability: a?.scores?.entity_stability?.score ?? null,
     contractType: a?.contract?.type || null,
+    messageCount: f.messages?.length || 0,
+    hasDashboard: !!a,
+    lastRole: lastMsg?.role || null,
   };
 }
 

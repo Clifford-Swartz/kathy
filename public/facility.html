@@ -6,36 +6,166 @@
   <title>Facility · Kathy</title>
   <link rel="stylesheet" href="/styles.css" />
 </head>
-<body>
-  <div class="container">
-    <header class="topbar">
-      <div class="brand">Kathy<small>CCRC Research Library</small></div>
-      <nav class="nav">
-        <a href="/">← Library</a>
-        <a href="/compare">Compare</a>
-      </nav>
-    </header>
+<body class="facility-body">
+  <header class="topbar container-wide">
+    <div class="brand">Kathy<small>CCRC Research Library</small></div>
+    <nav class="nav">
+      <a href="/">← Library</a>
+      <a href="/map">Map</a>
+      <a href="/compare">Compare</a>
+    </nav>
+  </header>
 
-    <div id="view"><div class="loading-state"><span class="spinner"></span>Loading…</div></div>
-  </div>
+  <main class="split">
+    <section class="chat-pane">
+      <div id="chat-header" class="chat-header">
+        <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:1rem">
+          <div style="min-width:0">
+            <h1 id="fac-name">Loading…</h1>
+            <div class="loc" id="fac-loc"></div>
+          </div>
+          <button id="delete-convo" class="secondary" title="Delete this conversation" style="flex-shrink:0">Delete</button>
+        </div>
+      </div>
+      <div id="messages" class="messages"></div>
+      <form id="composer" class="composer">
+        <textarea id="composer-text" rows="2" placeholder="Ask a follow-up, request a deeper dive on a section, or paste new info…"></textarea>
+        <button type="submit" class="primary">Send</button>
+      </form>
+    </section>
+
+    <aside class="dash-pane" id="dash-pane">
+      <div class="empty" id="dash-empty">
+        <div style="font-size:2rem">📊</div>
+        Dashboard will populate once Claude completes a deep dive.
+      </div>
+      <div id="dash-content" style="display:none"></div>
+    </aside>
+  </main>
 
   <script src="/app.js"></script>
   <script>
-    const view = document.getElementById('view');
     const id = new URLSearchParams(location.search).get('id');
-    if (!id) { view.innerHTML = '<div class="empty">No facility id.</div>'; }
+    const messagesEl = document.getElementById('messages');
+    const dashContent = document.getElementById('dash-content');
+    const dashEmpty = document.getElementById('dash-empty');
+    const facNameEl = document.getElementById('fac-name');
+    const facLocEl = document.getElementById('fac-loc');
+    const composer = document.getElementById('composer');
+    const composerText = document.getElementById('composer-text');
 
-    let currentFac = null;
-    let notesTimer = null;
+    let messageEls = new Map(); // messageId -> { bubble, textNode }
 
-    async function load() {
+    async function init() {
+      if (!id) { document.body.innerHTML = '<div class="empty">No facility id.</div>'; return; }
       try {
         const f = await api.get(id);
-        currentFac = f;
-        render(f);
-        if (f.status === 'pending') setTimeout(load, 2500);
-      } catch (e) {
-        view.innerHTML = '<div class="empty">Facility not found.</div>';
+        facNameEl.textContent = f.name || 'Untitled';
+        facLocEl.textContent = f.analysis?.identity?.location || '';
+        for (const m of f.messages || []) renderExistingMessage(m);
+        if (f.analysis) renderDashboard(f.analysis);
+        scrollToBottom(true);
+        subscribe();
+      } catch {
+        document.body.innerHTML = '<div class="empty">Facility not found.</div>';
+      }
+    }
+
+    function subscribe() {
+      const es = new EventSource('/api/facilities/' + id + '/stream');
+      es.addEventListener('message-start', (e) => {
+        const { messageId } = JSON.parse(e.data);
+        addAssistantPlaceholder(messageId);
+      });
+      es.addEventListener('delta', (e) => {
+        const { messageId, text } = JSON.parse(e.data);
+        appendDelta(messageId, text);
+      });
+      es.addEventListener('message-end', (e) => {
+        const { messageId, content, error } = JSON.parse(e.data);
+        finalizeMessage(messageId, content, error);
+      });
+      es.addEventListener('dashboard', (e) => {
+        const { analysis, name } = JSON.parse(e.data);
+        if (name) facNameEl.textContent = name;
+        renderDashboard(analysis);
+      });
+      es.addEventListener('user-message', (e) => {
+        const m = JSON.parse(e.data);
+        if (!messageEls.has(m.id)) renderExistingMessage(m);
+      });
+      es.onerror = () => { /* EventSource auto-reconnects */ };
+    }
+
+    function renderExistingMessage(m) {
+      const wrap = document.createElement('div');
+      wrap.className = 'msg ' + (m.role === 'user' ? 'user' : 'assistant');
+      const bubble = document.createElement('div');
+      bubble.className = 'bubble';
+      bubble.innerHTML = renderMarkdownLite(stripDashboard(m.content || ''));
+      wrap.appendChild(bubble);
+      messagesEl.appendChild(wrap);
+      messageEls.set(m.id, { bubble, raw: stripDashboard(m.content || '') });
+    }
+
+    function addAssistantPlaceholder(messageId) {
+      const wrap = document.createElement('div');
+      wrap.className = 'msg assistant';
+      const bubble = document.createElement('div');
+      bubble.className = 'bubble streaming';
+      bubble.innerHTML = '<span class="typing"><span></span><span></span><span></span></span>';
+      wrap.appendChild(bubble);
+      messagesEl.appendChild(wrap);
+      messageEls.set(messageId, { bubble, raw: '' });
+      scrollToBottom();
+    }
+
+    function appendDelta(messageId, text) {
+      const entry = messageEls.get(messageId);
+      if (!entry) return;
+      entry.raw += text;
+      const visible = stripDashboard(entry.raw);
+      if (!visible) {
+        // Still nothing user-facing (e.g. model is emitting only tool_use or
+        // a dashboard block) — keep the typing indicator visible.
+        entry.bubble.innerHTML = '<span class="typing"><span></span><span></span><span></span></span>';
+      } else {
+        entry.bubble.innerHTML = renderMarkdownLite(visible) + '<span class="cursor">▍</span>';
+      }
+      scrollToBottom();
+    }
+
+    function finalizeMessage(messageId, content, error) {
+      const entry = messageEls.get(messageId);
+      if (!entry) return;
+      const final = content != null ? content : entry.raw;
+      entry.bubble.classList.remove('streaming');
+      if (error) entry.bubble.classList.add('error');
+      entry.bubble.innerHTML = renderMarkdownLite(stripDashboard(final));
+      scrollToBottom();
+    }
+
+    function stripDashboard(s) {
+      return String(s || '').replace(/<dashboard>[\s\S]*?<\/dashboard>/gi, '').trim();
+    }
+
+    // Very small markdown-ish: paragraphs, bold, italics, inline code, newlines.
+    function renderMarkdownLite(s) {
+      if (!s) return '';
+      let out = escapeHtml(s);
+      out = out.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+      out = out.replace(/(?<!\*)\*([^*\n]+)\*(?!\*)/g, '<em>$1</em>');
+      out = out.replace(/`([^`]+)`/g, '<code>$1</code>');
+      out = out.split(/\n{2,}/).map(p => '<p>' + p.replace(/\n/g, '<br>') + '</p>').join('');
+      return out;
+    }
+
+    function scrollToBottom(force = false) {
+      // Don't yank the user back to the bottom if they've scrolled up to read.
+      const distanceFromBottom = messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight;
+      const nearBottom = distanceFromBottom < 120;
+      if (force || nearBottom) {
+        messagesEl.scrollTop = messagesEl.scrollHeight;
       }
     }
 
@@ -46,41 +176,11 @@
       return 'bad';
     }
 
-    function render(f) {
-      if (f.status === 'pending') {
-        view.innerHTML = `
-          <div class="dashboard-header">
-            <div class="meta">
-              <h1>${escapeHtml(f.name)}</h1>
-              <div class="loc">Queued · waiting for Claude</div>
-            </div>
-          </div>
-          <div class="loading-state">
-            <span class="spinner"></span>
-            Claude is researching this facility. This usually takes 30–120 seconds.
-          </div>`;
-        return;
-      }
+    function renderDashboard(a) {
+      if (!a) return;
+      dashEmpty.style.display = 'none';
+      dashContent.style.display = 'block';
 
-      if (f.status === 'error') {
-        view.innerHTML = `
-          <div class="dashboard-header">
-            <div class="meta">
-              <h1>${escapeHtml(f.name)}</h1>
-              <div class="loc">Analysis failed</div>
-            </div>
-            <button class="primary" onclick="retry()">Retry</button>
-          </div>
-          <div class="panel">
-            <h3>Error</h3>
-            <p>${escapeHtml(f.error || 'Unknown error')}</p>
-            <h3 style="margin-top:1.5rem">Original input</h3>
-            <pre style="white-space:pre-wrap; font-family:-apple-system,sans-serif; font-size:0.85rem; color:var(--ink-soft)">${escapeHtml(f.rawInput || '')}</pre>
-          </div>`;
-        return;
-      }
-
-      const a = f.analysis || {};
       const id_ = a.identity || {};
       const fin = a.financial || {};
       const con = a.contract || {};
@@ -89,157 +189,155 @@
       const npv = a.npv_analysis || {};
       const dq = scores.deal_quality || {};
       const es = scores.entity_stability || {};
+      const sources = a.field_sources || {};
 
-      view.innerHTML = `
-        <div class="dashboard-header">
-          <div class="meta">
-            <h1>${escapeHtml(id_.name || f.name)}</h1>
-            <div class="loc">
-              ${escapeHtml(id_.location || '—')}
-              ${id_.url ? ` · <a href="${escapeHtml(id_.url)}" target="_blank" rel="noopener">website ↗</a>` : ''}
-              ${id_.operator ? ` · ${escapeHtml(id_.operator)}` : ''}
-              ${id_.parent_org ? ` <span style="color:var(--muted)">(${escapeHtml(id_.parent_org)})</span>` : ''}
-            </div>
+      // Render a value with an optional superscript source link.
+      // The source link comes from field_sources[<dotted path>].
+      function v(value, path) {
+        const url = sources[path];
+        const link = url ? ` <a href="${escapeHtml(url)}" target="_blank" rel="noopener" class="src-link" title="Source: ${escapeHtml(url)}">⌖</a>` : '';
+        return value + link;
+      }
+
+      // Format an occupancy history array as "YYYY 89% → YYYY 87% → ..."
+      function fmtOccHistory(hist) {
+        if (!Array.isArray(hist) || !hist.length) return null;
+        return hist
+          .map(h => {
+            if (h == null || h.rate == null) return null;
+            const r = h.rate <= 1 ? (h.rate * 100) : h.rate;
+            const yr = h.year != null ? `${h.year}` : '';
+            const seg = h.segment && h.segment !== 'overall' ? ` ${h.segment}` : '';
+            return `<span style="white-space:nowrap">${yr}${seg} <strong>${r.toFixed(0)}%</strong></span>`;
+          })
+          .filter(Boolean)
+          .join(' &middot; ');
+      }
+
+      if (id_.location) facLocEl.textContent = id_.location;
+
+      dashContent.innerHTML = `
+        <div class="big-scores">
+          <div class="big-score">
+            <div class="label">Deal Quality</div>
+            <div class="val ${scoreClass(dq.score)}">${dq.score ?? '—'}</div>
+            <div class="rationale">${escapeHtml(dq.rationale || '')}</div>
           </div>
-          <div class="big-scores">
-            <div class="big-score">
-              <div class="label">Deal Quality</div>
-              <div class="val ${scoreClass(dq.score)}">${dq.score ?? '—'}</div>
-              <div class="rationale">${escapeHtml(dq.rationale || '')}</div>
-            </div>
-            <div class="big-score">
-              <div class="label">Entity Stability</div>
-              <div class="val ${scoreClass(es.score)}">${es.score ?? '—'}</div>
-              <div class="rationale">${escapeHtml(es.rationale || '')}</div>
-            </div>
+          <div class="big-score">
+            <div class="label">Entity Stability</div>
+            <div class="val ${scoreClass(es.score)}">${es.score ?? '—'}</div>
+            <div class="rationale">${escapeHtml(es.rationale || '')}</div>
           </div>
         </div>
 
-        ${a.narrative ? `
+        ${id_.url || id_.operator || id_.parent_org ? `
           <div class="panel">
-            <h3>Analyst narrative</h3>
-            <div class="narrative">${escapeHtml(a.narrative).replace(/\n\n/g, '</p><p>').replace(/^/, '<p>').replace(/$/, '</p>')}</div>
+            <h3>Identity</h3>
+            <div class="kv">
+              ${id_.url ? `<div class="k">Website</div><div class="v"><a href="${escapeHtml(id_.url)}" target="_blank" rel="noopener">link ↗</a></div>` : ''}
+              ${id_.operator ? `<div class="k">Operator</div><div class="v">${escapeHtml(id_.operator)}</div>` : ''}
+              ${id_.parent_org ? `<div class="k">Parent org</div><div class="v">${escapeHtml(id_.parent_org)}</div>` : ''}
+              ${id_.year_opened ? `<div class="k">Year opened</div><div class="v">${id_.year_opened}</div>` : ''}
+            </div>
           </div>` : ''}
 
         <div class="panel">
-          <h2>Contract</h2>
+          <h3>Contract</h3>
           <div class="kv">
             <div class="k">Type</div><div class="v">${escapeHtml(con.type || '—')}</div>
-            <div class="k">Summary</div><div class="v" style="text-align:left">${escapeHtml(con.summary || '—')}</div>
           </div>
-          ${(con.what_is_covered?.length || con.what_is_not_covered?.length) ? `
-            <div style="display:grid; grid-template-columns:1fr 1fr; gap:2rem; margin-top:1.25rem">
-              <div>
-                <h3>Covered</h3>
-                <ul style="font-family:-apple-system,sans-serif; font-size:0.9rem; padding-left:1.1rem; color:var(--ink-soft)">
-                  ${(con.what_is_covered || []).map(s => `<li>${escapeHtml(s)}</li>`).join('')}
-                </ul>
-              </div>
-              <div>
-                <h3>Not covered</h3>
-                <ul style="font-family:-apple-system,sans-serif; font-size:0.9rem; padding-left:1.1rem; color:var(--ink-soft)">
-                  ${(con.what_is_not_covered || []).map(s => `<li>${escapeHtml(s)}</li>`).join('')}
-                </ul>
-              </div>
-            </div>` : ''}
+          ${con.summary ? `<p style="font-family:-apple-system,sans-serif; font-size:0.85rem; margin-top:0.5rem">${escapeHtml(con.summary)}</p>` : ''}
         </div>
 
         <div class="panel">
-          <h2>Financial snapshot</h2>
+          <h3>Financial snapshot</h3>
           <div class="kv">
-            <div class="k">Entrance fee</div><div class="v">${fmtRange(fin.entrance_fee_low, fin.entrance_fee_high)}</div>
-            <div class="k">Refundable</div><div class="v">${fin.refundable_pct == null ? '—' : fin.refundable_pct + '%'}</div>
-            <div class="k">Monthly fee</div><div class="v">${fmtRange(fin.monthly_fee_low, fin.monthly_fee_high)}</div>
-            <div class="k">Occupancy</div><div class="v">${fin.occupancy_rate == null ? '—' : (fin.occupancy_rate * (fin.occupancy_rate <= 1 ? 100 : 1)).toFixed(1) + '% (' + (fin.occupancy_trend || 'unknown') + ')'}</div>
-            <div class="k">Days cash on hand</div><div class="v">${fmtNum(fin.days_cash_on_hand, 0)}</div>
-            <div class="k">Debt / assets</div><div class="v">${fmtPct(fin.debt_to_asset)}</div>
-            <div class="k">Operating margin</div><div class="v">${fmtPct(fin.operating_margin)}</div>
-            <div class="k">Debt service coverage</div><div class="v">${fmtNum(fin.debt_service_coverage, 2)}x</div>
+            <div class="k">Entrance fee</div><div class="v">${v(fmtRange(fin.entrance_fee_low, fin.entrance_fee_high), 'financial.entrance_fee_low')}</div>
+            <div class="k">Refundable</div><div class="v">${v(fin.refundable_pct == null ? '—' : fin.refundable_pct + '%', 'financial.refundable_pct')}</div>
+            <div class="k">Monthly fee</div><div class="v">${v(fmtRange(fin.monthly_fee_low, fin.monthly_fee_high), 'financial.monthly_fee_low')}</div>
+            <div class="k">Occupancy</div><div class="v">${v(fin.occupancy_rate == null ? '—' : (fin.occupancy_rate * (fin.occupancy_rate <= 1 ? 100 : 1)).toFixed(1) + '%', 'financial.occupancy_rate')}</div>
+            <div class="k">Days cash</div><div class="v">${v(fmtNum(fin.days_cash_on_hand, 0), 'financial.days_cash_on_hand')}</div>
+            <div class="k">Debt / assets</div><div class="v">${v(fmtPct(fin.debt_to_asset), 'financial.debt_to_asset')}</div>
+            <div class="k">Op margin</div><div class="v">${v(fmtPct(fin.operating_margin), 'financial.operating_margin')}</div>
+            <div class="k">DSCR</div><div class="v">${v(fmtNum(fin.debt_service_coverage, 2) + 'x', 'financial.debt_service_coverage')}</div>
           </div>
-          ${fin.fee_escalation_history_pct?.length ? `
-            <h3>Fee escalation history</h3>
-            <div style="font-family:-apple-system,sans-serif; font-size:0.9rem; color:var(--ink-soft)">
-              ${fin.fee_escalation_history_pct.map(p => p.toFixed(1) + '%').join(' · ')}
+          ${fmtOccHistory(fin.occupancy_history) ? `
+            <div style="margin-top:0.85rem; padding-top:0.7rem; border-top:1px dashed var(--border)">
+              <div style="font-family:-apple-system,sans-serif; font-size:0.7rem; text-transform:uppercase; letter-spacing:0.05em; color:var(--muted); margin-bottom:0.35rem">Occupancy history</div>
+              <div style="font-family:-apple-system,sans-serif; font-size:0.85rem; color:var(--ink); line-height:1.6">${fmtOccHistory(fin.occupancy_history)}</div>
             </div>` : ''}
         </div>
 
-        ${(npv.total_cost_10yr != null || npv.total_cost_20yr != null || npv.notes) ? `
+        ${(npv.total_cost_10yr != null || npv.total_cost_20yr != null) ? `
           <div class="panel">
-            <h2>NPV analysis</h2>
+            <h3>NPV</h3>
             <div class="kv">
-              <div class="k">10-year total cost</div><div class="v">${fmtMoney(npv.total_cost_10yr)}</div>
-              <div class="k">20-year total cost</div><div class="v">${fmtMoney(npv.total_cost_20yr)}</div>
+              <div class="k">10-yr cost</div><div class="v">${fmtMoney(npv.total_cost_10yr)}</div>
+              <div class="k">20-yr cost</div><div class="v">${fmtMoney(npv.total_cost_20yr)}</div>
             </div>
-            ${npv.assumptions ? `<h3>Assumptions</h3><p style="font-family:-apple-system,sans-serif; font-size:0.9rem">${escapeHtml(npv.assumptions)}</p>` : ''}
-            ${npv.notes ? `<p style="font-family:-apple-system,sans-serif; font-size:0.9rem; color:var(--ink-soft)">${escapeHtml(npv.notes)}</p>` : ''}
           </div>` : ''}
 
         <div class="panel">
-          <h2>Care quality</h2>
+          <h3>Care quality</h3>
           <div class="kv">
-            <div class="k">Medicare star rating</div><div class="v">${care.medicare_star_rating == null ? '—' : care.medicare_star_rating + ' ★'}</div>
-            <div class="k">CARF accredited</div><div class="v">${care.carf_accredited == null ? '—' : (care.carf_accredited ? 'Yes' : 'No')}</div>
+            <div class="k">Medicare ★</div><div class="v">${care.medicare_star_rating ?? '—'}</div>
+            <div class="k">CARF</div><div class="v">${care.carf_accredited == null ? '—' : (care.carf_accredited ? 'Yes' : 'No')}</div>
           </div>
-          ${care.recent_deficiencies?.length ? `
-            <h3>Recent deficiencies</h3>
-            <ul style="font-family:-apple-system,sans-serif; font-size:0.9rem; padding-left:1.1rem; color:var(--ink-soft)">
-              ${care.recent_deficiencies.map(s => `<li>${escapeHtml(s)}</li>`).join('')}
-            </ul>` : ''}
-          ${care.staff_ratio_notes ? `<p style="font-family:-apple-system,sans-serif; font-size:0.9rem">${escapeHtml(care.staff_ratio_notes)}</p>` : ''}
         </div>
 
         ${(a.red_flags?.length || a.highlights?.length) ? `
           <div class="panel">
-            <h2>Red flags &amp; highlights</h2>
+            <h3>Flags</h3>
             <div class="flags">
               ${(a.red_flags || []).map(s => `<div class="flag red">⚑ ${escapeHtml(s)}</div>`).join('')}
               ${(a.highlights || []).map(s => `<div class="flag green">★ ${escapeHtml(s)}</div>`).join('')}
             </div>
           </div>` : ''}
 
-        ${a.unknowns?.length ? `
-          <div class="panel">
-            <h3>Unknowns flagged by the model</h3>
-            <ul style="font-family:-apple-system,sans-serif; font-size:0.88rem; padding-left:1.1rem; color:var(--ink-soft)">
-              ${a.unknowns.map(s => `<li>${escapeHtml(s)}</li>`).join('')}
-            </ul>
-          </div>` : ''}
-
-        <div class="panel notes">
-          <h2>Your notes</h2>
-          <p class="sans" style="font-size:0.8rem; color:var(--muted); margin-top:-0.25rem">Saved automatically</p>
-          <textarea id="notes" placeholder="Thoughts, questions, follow-ups for the book…">${escapeHtml(f.notes || '')}</textarea>
-        </div>
-
         ${a.sources?.length ? `
           <div class="panel">
-            <h2>Sources</h2>
-            <ul class="sources" style="padding-left:1.1rem">
+            <h3>Sources</h3>
+            <ul class="sources" style="padding-left:1.1rem; margin:0">
               ${a.sources.map(s => `<li><a href="${escapeHtml(s.url)}" target="_blank" rel="noopener">${escapeHtml(s.title || s.url)}</a></li>`).join('')}
             </ul>
           </div>` : ''}
-
-        <div style="text-align:right; margin:1rem 0 3rem">
-          <button class="secondary" onclick="retry()">Re-analyze</button>
-        </div>
       `;
+    }
 
-      const notesEl = document.getElementById('notes');
-      if (notesEl) {
-        notesEl.addEventListener('input', () => {
-          clearTimeout(notesTimer);
-          notesTimer = setTimeout(() => api.saveNotes(id, notesEl.value), 600);
+    composer.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const text = composerText.value.trim();
+      if (!text) return;
+      composerText.value = '';
+      // optimistic render
+      const tempId = 'tmp-' + Math.random().toString(36).slice(2);
+      renderExistingMessage({ id: tempId, role: 'user', content: text });
+      scrollToBottom(true);
+      try {
+        await fetch('/api/facilities/' + id + '/message', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ content: text }),
         });
+      } catch (err) {
+        alert('Send failed: ' + err.message);
       }
-    }
+    });
 
-    async function retry() {
-      await fetch('/api/facilities/' + id + '/retry', { method: 'POST' });
-      load();
-    }
-    window.retry = retry;
+    document.getElementById('delete-convo').onclick = async () => {
+      if (!confirm('Delete this entire conversation and its dashboard?')) return;
+      await api.del(id);
+      location.href = '/';
+    };
 
-    load();
+    composerText.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        composer.dispatchEvent(new Event('submit'));
+      }
+    });
+
+    init();
   </script>
 </body>
 </html>

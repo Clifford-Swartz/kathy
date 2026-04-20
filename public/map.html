@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Map · Kathy</title>
+  <link rel="stylesheet" href="/styles.css" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+        integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+        crossorigin="" />
+  <style>
+    .map-shell { display: flex; flex-direction: column; height: calc(100vh - 90px); padding: 0 2rem 2rem; max-width: 1480px; margin: 0 auto; }
+    .map-controls {
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 1rem; padding-bottom: 0.85rem; border-bottom: 1px solid var(--border);
+      margin-bottom: 0.85rem; font-family: -apple-system, sans-serif;
+    }
+    .map-controls .stats { font-size: 0.85rem; color: var(--muted); }
+    .map-controls .stats strong { color: var(--ink); font-weight: 600; }
+    #map {
+      flex: 1; min-height: 0; border: 1px solid var(--border); border-radius: 8px;
+      background: #e6e2d4;
+    }
+    .leaflet-popup-content {
+      font-family: -apple-system, sans-serif; font-size: 0.9rem; min-width: 200px;
+    }
+    .leaflet-popup-content .pop-name { font-weight: 600; color: var(--ink); margin-bottom: 0.3rem; font-size: 1rem; }
+    .leaflet-popup-content .pop-loc { color: var(--muted); font-size: 0.82rem; margin-bottom: 0.6rem; }
+    .leaflet-popup-content .pop-scores { display: flex; gap: 0.75rem; margin-bottom: 0.6rem; }
+    .leaflet-popup-content .pop-score { flex: 1; text-align: center; padding: 0.3rem; background: #faf8f3; border-radius: 4px; }
+    .leaflet-popup-content .pop-score .label { font-size: 0.62rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
+    .leaflet-popup-content .pop-score .val { font-weight: 700; font-size: 1.1rem; color: var(--ink); }
+    .leaflet-popup-content button {
+      width: 100%; padding: 0.5rem; background: var(--accent); color: #fff;
+      border: none; border-radius: 4px; cursor: pointer; font-family: inherit;
+      font-size: 0.85rem; font-weight: 500;
+    }
+    .leaflet-popup-content button:hover { background: #634a30; }
+    .leaflet-popup-content button.secondary { background: transparent; color: var(--ink-soft); border: 1px solid var(--border); margin-top: 0.4rem; }
+    .leaflet-popup-content button.secondary:hover { background: #f0ebdd; }
+    .discover-btn {
+      background: var(--accent); color: #fff; border: none; padding: 0.55rem 1.1rem;
+      border-radius: 6px; font-family: inherit; font-size: 0.88rem; font-weight: 500;
+      cursor: pointer;
+    }
+    .discover-btn:hover { background: #634a30; }
+    .discover-btn:disabled { background: var(--muted); cursor: wait; }
+    .pin-pulse {
+      width: 22px; height: 22px; border-radius: 50%;
+      background: var(--accent); border: 3px solid #fff;
+      box-shadow: 0 0 0 2px rgba(122,92,62,0.4), 0 2px 6px rgba(0,0,0,0.25);
+      transition: transform 0.15s;
+    }
+    .pin-pulse:hover { transform: scale(1.25); }
+    .pin-pulse.analyzed { background: var(--good); box-shadow: 0 0 0 2px rgba(74,124,89,0.45), 0 2px 6px rgba(0,0,0,0.25); }
+    .pin-pulse.discovered { background: var(--muted); box-shadow: 0 0 0 2px rgba(138,133,120,0.4), 0 2px 6px rgba(0,0,0,0.2); }
+  </style>
+</head>
+<body>
+  <header class="topbar container-wide">
+    <div class="brand">Kathy<small>CCRC Research Library</small></div>
+    <nav class="nav">
+      <a href="/">Library</a>
+      <a href="/map">Map</a>
+      <a href="/compare">Compare</a>
+    </nav>
+  </header>
+
+  <div class="map-shell">
+    <div class="map-controls">
+      <div class="stats">
+        <strong id="visible-count">0</strong> facilities visible ·
+        <strong id="total-count">0</strong> total ·
+        <span id="discover-status"></span>
+      </div>
+      <button id="discover-btn" class="discover-btn">🔍 Find CCRCs in this view</button>
+    </div>
+    <div id="map"></div>
+  </div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+          integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+          crossorigin=""></script>
+  <script src="/app.js"></script>
+  <script>
+    const map = L.map('map', { zoomControl: true }).setView([39.5, -78], 5);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 18,
+      attribution: '&copy; OpenStreetMap contributors',
+    }).addTo(map);
+
+    const markers = new Map(); // facilityId -> Leaflet marker
+    const visibleCountEl = document.getElementById('visible-count');
+    const totalCountEl = document.getElementById('total-count');
+    const discoverStatus = document.getElementById('discover-status');
+    const discoverBtn = document.getElementById('discover-btn');
+
+    function pinIcon(f) {
+      const cls = f.hasDashboard ? 'analyzed' : (f.source === 'discovered' || f.source === 'seed' ? 'discovered' : '');
+      return L.divIcon({
+        className: '',
+        html: `<div class="pin-pulse ${cls}"></div>`,
+        iconSize: [22, 22],
+        iconAnchor: [11, 11],
+      });
+    }
+
+    function popupHTML(f) {
+      const loc = [f.city, f.state].filter(Boolean).join(', ') || '—';
+      const scoresBlock = f.hasDashboard ? `
+        <div class="pop-scores">
+          <div class="pop-score"><div class="label">Deal</div><div class="val">${f.dealQuality ?? '—'}</div></div>
+          <div class="pop-score"><div class="label">Stab</div><div class="val">${f.entityStability ?? '—'}</div></div>
+        </div>` : '';
+      const buttonLabel = f.hasChat ? 'Open chat →' : 'Start research chat →';
+      return `
+        <div class="pop-name">${escapeHtml(f.name)}</div>
+        <div class="pop-loc">${escapeHtml(loc)}</div>
+        ${scoresBlock}
+        <button onclick="openOrStart('${f.id}', ${f.hasChat})">${buttonLabel}</button>
+      `;
+    }
+
+    window.openOrStart = async (id, hasChat) => {
+      if (hasChat) {
+        location.href = '/facility?id=' + id;
+        return;
+      }
+      // Pure discovery — kick off a chat by sending the first message via
+      // POST /api/facilities/:id/message-style flow. We don't have a "promote
+      // existing facility into a chat" endpoint, so reuse the create flow:
+      // delete the discovery and create a fresh facility with the same name.
+      const f = await api.get(id).catch(() => null);
+      if (!f) return alert('not found');
+      const seedText = [f.name, [f.city, f.state].filter(Boolean).join(', ')].filter(Boolean).join(' — ');
+      // Send the first message into the existing record so we don't lose
+      // location data and so the map pin auto-promotes from gray to active.
+      await fetch('/api/facilities/' + id + '/message', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content: seedText }),
+      });
+      location.href = '/facility?id=' + id;
+    };
+
+    async function refresh() {
+      const facs = await fetch('/api/map').then(r => r.json());
+      totalCountEl.textContent = facs.length;
+      let visible = 0;
+      const seenIds = new Set();
+      for (const f of facs) {
+        seenIds.add(f.id);
+        if (f.lat == null || f.lon == null) continue;
+        visible++;
+        const existing = markers.get(f.id);
+        if (existing) {
+          existing.setIcon(pinIcon(f));
+          existing.setPopupContent(popupHTML(f));
+        } else {
+          const m = L.marker([f.lat, f.lon], { icon: pinIcon(f) }).addTo(map);
+          m.bindPopup(popupHTML(f));
+          markers.set(f.id, m);
+        }
+      }
+      // Remove markers for deleted facilities
+      for (const [id, m] of markers) {
+        if (!seenIds.has(id)) { map.removeLayer(m); markers.delete(id); }
+      }
+      visibleCountEl.textContent = visible;
+    }
+
+    discoverBtn.onclick = async () => {
+      const b = map.getBounds();
+      discoverBtn.disabled = true;
+      discoverBtn.textContent = '🔍 Searching…';
+      discoverStatus.textContent = 'Claude is searching the web for CCRCs in this region…';
+      try {
+        await fetch('/api/discover', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            north: b.getNorth(), south: b.getSouth(),
+            east: b.getEast(), west: b.getWest(),
+          }),
+        });
+        // Poll for new pins for ~3 minutes
+        let prevCount = markers.size;
+        for (let i = 0; i < 90; i++) {
+          await new Promise(r => setTimeout(r, 2000));
+          await refresh();
+          if (markers.size > prevCount) {
+            discoverStatus.textContent = `+${markers.size - prevCount} new facilities (still searching…)`;
+          }
+        }
+        discoverStatus.textContent = '';
+      } catch (e) {
+        discoverStatus.textContent = 'Failed: ' + e.message;
+      } finally {
+        discoverBtn.disabled = false;
+        discoverBtn.textContent = '🔍 Find CCRCs in this view';
+      }
+    };
+
+    refresh();
+    setInterval(refresh, 5000);
+  </script>
+</body>
+</html>
