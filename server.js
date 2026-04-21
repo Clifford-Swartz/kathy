@@ -217,7 +217,39 @@ Rules:
   • In DEEP DIVE turns, ALWAYS emit the dashboard and accompany it with a brief human-readable summary of what you found.
   • Never fabricate numbers. Use null + list it in "unknowns".
   • For every financial number you populate, add an entry to \`field_sources\` mapping the dotted field path (e.g. \`"financial.occupancy_rate"\`) to the actual URL you got it from. If you have no source, leave the number null. This is non-negotiable — the user is writing a book and needs to footnote everything.
-  • For \`occupancy_history\`, prefer reverse chronological (newest first). Rates can be expressed as 0–1 (0.89) or 0–100 (89) — be consistent within a single response.`;
+  • For \`occupancy_history\`, prefer reverse chronological (newest first). Rates can be expressed as 0–1 (0.89) or 0–100 (89) — be consistent within a single response.
+
+STRUCTURAL TRAPS — common misreadings that look right but aren't. Check each one on every DEEP DIVE:
+
+  1. Parent/subsidiary compensation on Form 990. Part VII columns distinguish compensation from the filer (col F) from compensation from related organizations (col G). When a CCRC is owned by a larger nonprofit (a university, health system, or religious corporation), the parent's executives often appear on the CCRC's 990 but their comp comes from the parent. Do NOT attribute parent-paid compensation to the CCRC's own cost structure. State explicitly which entity pays each named officer.
+
+  2. Reserve contributions masquerading as operating losses. Many nonprofit CCRCs deliberately run reported "operating deficits" while actually routing surplus cash into long-term investment reserves, debt service reserves, or restricted funds — and those contributions often appear in the operating expense line. Before calling something an operating loss, check the cash flow statement and notes for transfers to reserves / investments. A facility that "lost" money on paper but grew its reserves is healthy, not distressed.
+
+  3. Legacy vs. current contract cohorts. A CCRC may have three contract generations coexisting: a declining-balance contract offered to long-tenured residents, a refundable-deposit generation for mid-2000s entrants, and a standard contract for everyone new. Do NOT report a legacy contract as "the contract type" just because it covers a lot of current residents. Ask: "What does a new entrant sign today?" That is the contract type for the dashboard. Note legacy cohorts in the \`summary\` field.
+
+  4. Ownership transfers and recent restructurings. Campuses change hands: land-lease to fee-simple conversions, affiliate-operator swaps, parent-org carve-outs. Public filings lag real events by 12–24 months. Before trusting "the university owns the land" or "the facility leases from X," verify against the most recent audit or press announcements — and flag in \`red_flags\` or \`highlights\` if a transfer happened recently.
+
+  5. Stale comparable data. "Days cash on hand" and "occupancy" as of FY2019 are worthless; pull the most recent filing on EMMA or in state disclosures, and note the as-of date in the field source URL when possible.
+
+SCORING RUBRIC — use the full 0–100 range. Clustering every facility in the 60–75 "safe middle" is a failure mode that makes the dashboards useless for comparison. Be decisive; if data is thin, score LOW with the uncertainty flagged in rationale — do NOT default to the middle.
+
+  Deal Quality (buyer's perspective, resident NPV):
+    90–100  Exceptional value. Low entrance fee vs peers, ≥90% refundable, Type A with historically low fee inflation, clear NPV edge over alternatives.
+    75–89   Good. Competitive pricing, solid refund terms, reasonable fee trajectory.
+    60–74   Fair. Market-rate entrance, typical refund schedule, nothing particularly advantaged.
+    40–59   Below average. Premium pricing without commensurate value, weak refundability, rising fee trajectory, or Type B/C forcing high late-life out-of-pocket.
+    20–39   Poor. Significant contract, pricing, or refund red flags. Likely better alternatives nearby.
+    0–19    Predatory or effectively failing.
+
+  Entity Stability (going-concern, bondholder/resident risk perspective):
+    90–100  Fortress. >500 days cash, DSCR >2.5×, occupancy >95%, investment-grade parent, no covenant issues, multi-cycle resilient.
+    75–89   Strong. 300–500 days, DSCR 1.5–2.5×, occupancy 90–95%, solid parent backing.
+    60–74   Adequate. 200–300 days, DSCR 1.2–1.5×, occupancy 85–90%, modest exposure.
+    40–59   Concerning. 100–200 days, DSCR 1.0–1.2×, occupancy 80–85%, thin cushion.
+    20–39   Distressed. Covenant-adjacent, declining occupancy, thin reserves.
+    0–19    Failing, in default, or recently bankrupt.
+
+  If two facilities end up with identical scores, at least one is probably wrong — re-examine.`;
 
 // ---------- Bridge (desktop) SSE ----------
 
