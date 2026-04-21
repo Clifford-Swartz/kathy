@@ -190,14 +190,40 @@
       const dq = scores.deal_quality || {};
       const es = scores.entity_stability || {};
       const sources = a.field_sources || {};
+      const confidence = a.field_confidence || {};
+      const discrepancies = Array.isArray(a.discrepancies) ? a.discrepancies : [];
+      const discByField = new Map();
+      for (const d of discrepancies) {
+        if (d && d.field) discByField.set(d.field, d);
+      }
 
-      // Render a value with an optional superscript source link.
-      // The source link comes from field_sources[<dotted path>].
+      // Render a value with an optional source link, confidence class,
+      // and discrepancy chip when the sources disagree on this field.
       function v(value, path) {
         const url = sources[path];
-        const link = url ? ` <a href="${escapeHtml(url)}" target="_blank" rel="noopener" class="src-link" title="Source: ${escapeHtml(url)}">⌖</a>` : '';
-        return value + link;
+        const conf = confidence[path]; // 'high' | 'medium' | 'low'
+        const disc = discByField.get(path);
+        const confClass = conf ? ` conf-${conf}` : '';
+        const link = url ? ` <a href="${escapeHtml(url)}" target="_blank" rel="noopener" class="src-link" title="Source (${conf || 'unknown confidence'}): ${escapeHtml(url)}">⌖</a>` : '';
+        const discChip = disc
+          ? ` <button type="button" class="disc-chip" onclick="showDiscrepancy('${escapeHtml(path)}')" title="Sources disagree — click for details">⚠</button>`
+          : '';
+        return `<span class="conf-wrap${confClass}">${value}${link}${discChip}</span>`;
       }
+
+      // Expose to inline onclick handlers
+      window._discrepancies = discByField;
+      window.showDiscrepancy = function (path) {
+        const d = window._discrepancies.get(path);
+        if (!d) return;
+        const lines = [`Sources disagree on ${d.field}:`, ''];
+        for (const val of (d.values || [])) {
+          lines.push(`• ${val.tier || 'source'}: ${val.claim}`);
+          if (val.url) lines.push(`    ${val.url}`);
+        }
+        if (d.note) { lines.push(''); lines.push(`Note: ${d.note}`); }
+        alert(lines.join('\n'));
+      };
 
       // Format an occupancy history array as "YYYY 89% → YYYY 87% → ..."
       function fmtOccHistory(hist) {

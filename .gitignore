@@ -5,3 +5,4 @@ node_modules/
 .env.bridge
 .env
 .local-token
+test-output/

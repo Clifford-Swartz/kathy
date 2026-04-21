@@ -155,15 +155,46 @@ function runClaudeStreaming(prompt, onDelta) {
 }
 
 // Claude Code's stream-json emits several event shapes. We care about
-// assistant text (for the real content) AND tool_use starts (to show activity
-// feedback during long research loops).
+// assistant text (for the real content) AND tool_use blocks (to show what
+// Claude is actually doing during long research loops).
 function toolIcon(name) {
   if (!name) return '🛠';
   if (/WebSearch/i.test(name)) return '🔍';
   if (/WebFetch/i.test(name)) return '🌐';
   if (/Read/i.test(name)) return '📄';
   if (/Bash/i.test(name)) return '⚙';
+  if (/Agent|Task/i.test(name)) return '🤖';
   return '🛠';
+}
+
+// Build a descriptive one-liner from a tool's input so the user can see what
+// each call is actually doing, not just "Agent…".
+function describeTool(name, input) {
+  if (!name) return 'tool';
+  if (!input || typeof input !== 'object') return name;
+  const trim = (s, n = 90) => {
+    s = String(s || '').replace(/\s+/g, ' ').trim();
+    return s.length > n ? s.slice(0, n - 1) + '…' : s;
+  };
+  if (/Agent|Task/i.test(name)) {
+    const d = input.description || input.subagent_type || input.prompt || '';
+    return trim(d) || name;
+  }
+  if (/WebSearch/i.test(name)) return trim(input.query);
+  if (/WebFetch/i.test(name)) return trim(input.url);
+  if (/Bash/i.test(name)) return trim(input.description || input.command);
+  if (/Read|Write|Edit/i.test(name)) return trim(input.file_path || input.path);
+  if (/Glob|Grep/i.test(name)) return trim(input.pattern || input.path);
+  return name;
+}
+
+function emitTool(state, onDelta, name, input) {
+  const desc = describeTool(name, input);
+  const label = desc && desc !== name ? `${name}: ${desc}` : name;
+  const line = `\n\n*${toolIcon(name)} ${label}…*\n\n`;
+  state.sawPartialDeltas = true;
+  state.finalText += line;
+  onDelta(line);
 }
 
 function handleEvent(evt, onDelta, state) {
@@ -171,8 +202,9 @@ function handleEvent(evt, onDelta, state) {
 
   if (evt.type === 'stream_event' && evt.event) {
     const sub = evt.event;
+    const idx = sub.index;
 
-    // Partial text deltas — the happy path.
+    // Text deltas — the happy path.
     if (sub.type === 'content_block_delta' && sub.delta?.type === 'text_delta') {
       const t = sub.delta.text || '';
       if (t) {
@@ -183,13 +215,30 @@ function handleEvent(evt, onDelta, state) {
       return;
     }
 
-    // Tool-use block start — show Kathy what Claude is doing.
+    // Tool-use block start — remember we're accumulating its input.
     if (sub.type === 'content_block_start' && sub.content_block?.type === 'tool_use') {
-      const name = sub.content_block.name || 'tool';
-      const line = `\n\n*${toolIcon(name)} ${name}…*\n\n`;
-      state.sawPartialDeltas = true;
-      state.finalText += line;
-      onDelta(line);
+      state.toolBlocks = state.toolBlocks || {};
+      state.toolBlocks[idx] = { name: sub.content_block.name || 'tool', inputBuf: '' };
+      return;
+    }
+
+    // Tool input streaming in as JSON deltas.
+    if (sub.type === 'content_block_delta' && sub.delta?.type === 'input_json_delta') {
+      if (state.toolBlocks?.[idx]) {
+        state.toolBlocks[idx].inputBuf += sub.delta.partial_json || '';
+      }
+      return;
+    }
+
+    // Tool block finished — now we have the full input, emit the rich label.
+    if (sub.type === 'content_block_stop') {
+      const block = state.toolBlocks?.[idx];
+      if (block) {
+        let input = null;
+        try { input = JSON.parse(block.inputBuf); } catch {}
+        emitTool(state, onDelta, block.name, input);
+        delete state.toolBlocks[idx];
+      }
       return;
     }
   }
@@ -202,9 +251,7 @@ function handleEvent(evt, onDelta, state) {
         state.finalText += block.text;
         onDelta(block.text);
       } else if (block.type === 'tool_use') {
-        const line = `\n\n*${toolIcon(block.name)} ${block.name || 'tool'}…*\n\n`;
-        state.finalText += line;
-        onDelta(line);
+        emitTool(state, onDelta, block.name, block.input);
       }
     }
     return;

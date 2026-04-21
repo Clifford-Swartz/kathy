@@ -257,6 +257,23 @@ button.secondary:hover { background: #f0ebdd; }
 }
 .src-link:hover { opacity: 1; text-decoration: none; }
 
+/* Confidence dimming — low-confidence values render subtly muted so the reader
+   can instantly tell which numbers are rock-solid vs. best-we-could-find. */
+.conf-wrap { display: inline; }
+.conf-wrap.conf-low { color: var(--muted); font-style: italic; }
+.conf-wrap.conf-medium { color: var(--ink-soft); }
+.conf-wrap.conf-high { color: var(--ink); }
+
+/* Discrepancy chip — shown next to a field when sources disagree. */
+.disc-chip {
+  display: inline-block; background: #fff3d6; color: #8a6300;
+  border: 1px solid #e6c987; border-radius: 3px;
+  padding: 0 4px; margin-left: 4px; cursor: pointer;
+  font-size: 0.72em; line-height: 1.3; vertical-align: middle;
+  font-family: inherit;
+}
+.disc-chip:hover { background: #ffe59e; }
+
 .flags { display: flex; flex-direction: column; gap: 0.4rem; }
 .flag {
   font-family: -apple-system, sans-serif; font-size: 0.82rem;
