@@ -4,7 +4,7 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
-import { SYSTEM_PROMPT } from './prompts.js';
+import { getSystemPrompt, FACILITY_TYPES } from './prompts.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT) || 5317;
@@ -169,7 +169,7 @@ function dispatchJob(job) {
     } else {
       bridge.res.write(`event: analyze\ndata: ${JSON.stringify({
         jobId: job.jobId,
-        systemPrompt: SYSTEM_PROMPT,
+        systemPrompt: getSystemPrompt(job.facilityType),
         messages: job.messages,
       })}\n\n`);
     }
@@ -180,10 +180,10 @@ function dispatchJob(job) {
   }
 }
 
-function enqueueJob(messages, facilityId, assistantMessageId) {
+function enqueueJob(messages, facilityId, assistantMessageId, facilityType) {
   return new Promise((resolve, reject) => {
     const jobId = randomUUID();
-    const job = { jobId, kind: 'analyze', messages, facilityId, assistantMessageId, resolve, reject, dispatched: false };
+    const job = { jobId, kind: 'analyze', messages, facilityId, assistantMessageId, facilityType, resolve, reject, dispatched: false };
     job.timer = setTimeout(() => {
       pendingJobs.delete(jobId);
       jobRouting.delete(jobId);
@@ -267,7 +267,7 @@ async function runAssistantTurn(facilityId) {
 
   try {
     const history = fac.messages.slice(0, -1).map((m) => ({ role: m.role, content: m.content }));
-    const fullText = await enqueueJob(history, facilityId, assistantMsg.id);
+    const fullText = await enqueueJob(history, facilityId, assistantMsg.id, fac.facilityType || 'ccrc');
 
     const { dashboard, chatText } = parseDashboard(fullText);
 
@@ -516,6 +516,7 @@ const server = http.createServer(async (req, res) => {
       return sendJSON(res, 200, db.facilities.map((f) => ({
         id: f.id,
         name: f.name,
+        facilityType: f.facilityType || 'ccrc',
         city: f.city,
         state: f.state,
         lat: f.lat,
@@ -525,6 +526,8 @@ const server = http.createServer(async (req, res) => {
         hasDashboard: !!f.analysis,
         dealQuality: f.analysis?.scores?.deal_quality?.score ?? null,
         entityStability: f.analysis?.scores?.entity_stability?.score ?? null,
+        careQuality: f.analysis?.scores?.care_quality?.score ?? null,
+        operatorRisk: f.analysis?.scores?.operator_risk?.score ?? null,
       })));
     }
 
@@ -546,11 +549,13 @@ const server = http.createServer(async (req, res) => {
       const body = await readBody(req);
       const input = (body.input || '').trim();
       if (!input) return sendJSON(res, 400, { error: 'input required' });
+      const facilityType = FACILITY_TYPES.includes(body.facilityType) ? body.facilityType : 'ccrc';
       const id = randomUUID();
       const db = await readDB();
       const rec = {
         id,
         name: deriveName(input),
+        facilityType,
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
         messages: [{ id: randomUUID(), role: 'user', content: input, ts: new Date().toISOString() }],
@@ -651,11 +656,14 @@ function summary(f) {
   return {
     id: f.id,
     name: f.name,
+    facilityType: f.facilityType || 'ccrc',
     createdAt: f.createdAt,
     updatedAt: f.updatedAt,
     location: a?.identity?.location || null,
     dealQuality: a?.scores?.deal_quality?.score ?? null,
     entityStability: a?.scores?.entity_stability?.score ?? null,
+    careQuality: a?.scores?.care_quality?.score ?? null,
+    operatorRisk: a?.scores?.operator_risk?.score ?? null,
     contractType: a?.contract?.type || null,
     messageCount: f.messages?.length || 0,
     hasDashboard: !!a,

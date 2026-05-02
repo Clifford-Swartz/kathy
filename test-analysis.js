@@ -17,7 +17,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
-import { SYSTEM_PROMPT } from './prompts.js';
+import { getSystemPrompt } from './prompts.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -51,11 +51,21 @@ function resolveClaudeBin() {
 
 const CLAUDE_BIN = resolveClaudeBin();
 
-const facility = process.argv.slice(2).join(' ').trim();
+// Parse args: --type <ccrc|senior_living|mixed> may appear anywhere; everything
+// else is the facility name. Default type: ccrc (preserves old usage).
+const argv = process.argv.slice(2);
+let facilityType = 'ccrc';
+const facilityParts = [];
+for (let i = 0; i < argv.length; i++) {
+  if (argv[i] === '--type' && argv[i + 1]) { facilityType = argv[++i]; continue; }
+  facilityParts.push(argv[i]);
+}
+const facility = facilityParts.join(' ').trim();
 if (!facility) {
-  console.error('Usage: node test-analysis.js "Facility name or prompt"');
+  console.error('Usage: node test-analysis.js [--type ccrc|senior_living|mixed] "Facility name"');
   process.exit(1);
 }
+const SYSTEM_PROMPT = getSystemPrompt(facilityType);
 
 const outDir = path.join(__dirname, 'test-output');
 fs.mkdirSync(outDir, { recursive: true });
@@ -77,6 +87,7 @@ const prompt = [
 console.error(`[test] claude bin: ${CLAUDE_BIN}`);
 console.error(`[test] model: ${MODEL}`);
 console.error(`[test] facility: ${facility}`);
+console.error(`[test] type: ${facilityType}`);
 console.error(`[test] output: ${outBase}.{txt,json}`);
 console.error('[test] running — this will take 30–180s depending on tool use...\n');
 

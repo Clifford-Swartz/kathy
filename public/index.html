@@ -19,10 +19,15 @@
 
     <section>
       <h1>Start a new conversation</h1>
-      <p>Paste a CCRC name, URL, or brochure text. Claude will confirm what she's looking at, then deep-dive and build a Deal Quality + Entity Stability dashboard. You can keep talking to Claude about each facility afterward.</p>
+      <p>Paste a facility name, URL, or brochure text. Claude will research it and build a dashboard tailored to the facility type. Keep talking to Claude about each facility afterward.</p>
 
       <div class="paste-card" style="margin-top:1.25rem">
-        <textarea id="input" placeholder="e.g. 'Kendal at Hanover, NH' — or paste a brochure, financial disclosure, or URL…"></textarea>
+        <div class="type-picker" style="display:flex; gap:0.5rem; margin-bottom:0.85rem; flex-wrap:wrap">
+          <label class="type-opt"><input type="radio" name="ftype" value="ccrc" checked /><span>CCRC<small>buy-in, life-care</small></span></label>
+          <label class="type-opt"><input type="radio" name="ftype" value="senior_living" /><span>Senior Living<small>IL · AL · MC (rental)</small></span></label>
+          <label class="type-opt"><input type="radio" name="ftype" value="mixed" /><span>Mixed Campus<small>CCRC + AL/MC together</small></span></label>
+        </div>
+        <textarea id="input" placeholder="e.g. 'Kendal at Hanover, NH' or 'Brookdale Quincy Bay, MA' — or paste a brochure, financial disclosure, or URL…"></textarea>
         <div style="display:flex; justify-content:space-between; align-items:center; margin-top:0.85rem">
           <p class="hint">Opus 4.6 · runs locally via your Claude subscription</p>
           <button id="start" class="primary">Start chat →</button>
@@ -74,22 +79,30 @@
     }
 
     function cardHTML(f) {
-      const dq = f.dealQuality;
-      const es = f.entityStability;
+      const isAL = f.facilityType === 'senior_living';
+      const isMixed = f.facilityType === 'mixed';
+      // For senior_living facilities, show care quality + operator risk.
+      // For ccrc + mixed, show deal quality + stability (mixed campuses
+      // also have AL data but the buy-in side is the headline).
+      const leftLabel = isAL ? 'Care Quality' : 'Deal Quality';
+      const rightLabel = isAL ? 'Operator Risk' : 'Stability';
+      const leftVal = isAL ? f.careQuality : f.dealQuality;
+      const rightVal = isAL ? f.operatorRisk : f.entityStability;
+      const typeBadge = isAL ? 'AL' : (isMixed ? 'Mixed' : 'CCRC');
       return `
         <a class="card" href="/facility?id=${f.id}">
-          <span class="msg-count">${f.messageCount} msg${f.messageCount === 1 ? '' : 's'}</span>
+          <span class="msg-count">${f.messageCount} msg${f.messageCount === 1 ? '' : 's'} · <span class="type-badge type-${f.facilityType || 'ccrc'}">${typeBadge}</span></span>
           <button class="delete-btn" data-delete="${f.id}" title="Delete">×</button>
           <div class="name">${escapeHtml(f.name || 'Untitled')}</div>
           <div class="loc">${escapeHtml(f.location || '—')}</div>
           <div class="scores">
             <div class="score">
-              <div class="label">Deal Quality</div>
-              <div class="val ${scoreClass(dq)} ${dq == null ? 'pending' : ''}">${dq == null ? '—' : dq}</div>
+              <div class="label">${leftLabel}</div>
+              <div class="val ${scoreClass(leftVal)} ${leftVal == null ? 'pending' : ''}">${leftVal == null ? '—' : leftVal}</div>
             </div>
             <div class="score">
-              <div class="label">Stability</div>
-              <div class="val ${scoreClass(es)} ${es == null ? 'pending' : ''}">${es == null ? '—' : es}</div>
+              <div class="label">${rightLabel}</div>
+              <div class="val ${scoreClass(rightVal)} ${rightVal == null ? 'pending' : ''}">${rightVal == null ? '—' : rightVal}</div>
             </div>
           </div>
         </a>`;
@@ -98,10 +111,11 @@
     btn.onclick = async () => {
       const text = input.value.trim();
       if (!text) return input.focus();
+      const facilityType = document.querySelector('input[name="ftype"]:checked')?.value || 'ccrc';
       btn.disabled = true;
       btn.textContent = 'Starting…';
       try {
-        const { id } = await api.create(text);
+        const { id } = await api.create(text, facilityType);
         location.href = '/facility?id=' + id;
       } catch (e) {
         alert('Failed: ' + e.message);

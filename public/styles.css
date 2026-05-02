@@ -274,6 +274,33 @@ button.secondary:hover { background: #f0ebdd; }
 }
 .disc-chip:hover { background: #ffe59e; }
 
+/* Facility type picker (segmented control on index.html) */
+.type-picker { font-family: -apple-system, sans-serif; }
+.type-opt {
+  flex: 1; min-width: 0; cursor: pointer; user-select: none;
+  border: 1px solid var(--border); border-radius: 6px; padding: 0.6rem 0.8rem;
+  background: #fdfcf9; transition: all 0.15s;
+}
+.type-opt input { display: none; }
+.type-opt span { display: block; font-size: 0.9rem; font-weight: 600; color: var(--ink); }
+.type-opt span small { display: block; font-weight: 400; font-size: 0.72rem; color: var(--muted); margin-top: 2px; }
+.type-opt:hover { border-color: var(--accent-soft); }
+.type-opt:has(input:checked) {
+  background: var(--accent); border-color: var(--accent);
+}
+.type-opt:has(input:checked) span,
+.type-opt:has(input:checked) span small { color: #fff; }
+
+/* Tiny facility-type badge for cards / dashboards */
+.type-badge {
+  display: inline-block; padding: 1px 5px; border-radius: 3px;
+  font-size: 0.66rem; font-weight: 600; letter-spacing: 0.04em;
+  text-transform: uppercase; vertical-align: middle;
+}
+.type-badge.type-ccrc { background: #e8e2d4; color: #4a4a4a; }
+.type-badge.type-senior_living { background: #d6e8e0; color: #234a2d; }
+.type-badge.type-mixed { background: #f0d8c0; color: #6e3a14; }
+
 .flags { display: flex; flex-direction: column; gap: 0.4rem; }
 .flag {
   font-family: -apple-system, sans-serif; font-size: 0.82rem;

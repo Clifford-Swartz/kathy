@@ -8,11 +8,11 @@ const api = {
     if (!r.ok) throw new Error('not found');
     return r.json();
   },
-  async create(input) {
+  async create(input, facilityType = 'ccrc') {
     const r = await fetch('/api/facilities', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ input }),
+      body: JSON.stringify({ input, facilityType }),
     });
     if (!r.ok) throw new Error((await r.json()).error || 'failed');
     return r.json();

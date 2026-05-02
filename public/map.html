@@ -54,6 +54,21 @@
     .pin-pulse:hover { transform: scale(1.25); }
     .pin-pulse.analyzed { background: var(--good); box-shadow: 0 0 0 2px rgba(74,124,89,0.45), 0 2px 6px rgba(0,0,0,0.25); }
     .pin-pulse.discovered { background: var(--muted); box-shadow: 0 0 0 2px rgba(138,133,120,0.4), 0 2px 6px rgba(0,0,0,0.2); }
+    /* Senior-living facilities (rental — distinct from CCRC buy-in) get a
+       teal hue so they're visually separable on the map. */
+    .pin-pulse.al { background: #4a8a9c; box-shadow: 0 0 0 2px rgba(74,138,156,0.4), 0 2px 6px rgba(0,0,0,0.25); }
+    .pin-pulse.al.analyzed { background: #2d7a5a; box-shadow: 0 0 0 2px rgba(45,122,90,0.45), 0 2px 6px rgba(0,0,0,0.25); }
+    /* Mixed campuses get a warm orange */
+    .pin-pulse.mixed { background: #c08a2e; box-shadow: 0 0 0 2px rgba(192,138,46,0.45), 0 2px 6px rgba(0,0,0,0.25); }
+    .map-legend {
+      font-family: -apple-system, sans-serif; font-size: 0.75rem;
+      color: var(--ink-soft); display: flex; gap: 1rem; flex-wrap: wrap;
+    }
+    .map-legend .swatch {
+      display: inline-block; width: 10px; height: 10px; border-radius: 50%;
+      margin-right: 4px; vertical-align: middle; border: 1px solid #fff;
+      box-shadow: 0 0 0 1px rgba(0,0,0,0.1);
+    }
   </style>
 </head>
 <body>
@@ -70,7 +85,14 @@
     <div class="map-controls">
       <div class="stats">
         <strong id="visible-count">0</strong> facilities visible ·
-        <strong id="total-count">0</strong> total ·
+        <strong id="total-count">0</strong> total
+        <div class="map-legend" style="margin-top:0.35rem">
+          <span><span class="swatch" style="background:var(--accent)"></span>CCRC</span>
+          <span><span class="swatch" style="background:#4a8a9c"></span>Senior Living</span>
+          <span><span class="swatch" style="background:#c08a2e"></span>Mixed</span>
+          <span><span class="swatch" style="background:var(--good)"></span>Analyzed</span>
+          <span><span class="swatch" style="background:var(--muted)"></span>Discovered</span>
+        </div>
         <span id="discover-status"></span>
       </div>
       <button id="discover-btn" class="discover-btn">🔍 Find CCRCs in this view</button>
@@ -96,10 +118,13 @@
     const discoverBtn = document.getElementById('discover-btn');
 
     function pinIcon(f) {
-      const cls = f.hasDashboard ? 'analyzed' : (f.source === 'discovered' || f.source === 'seed' ? 'discovered' : '');
+      const typeClass =
+        f.facilityType === 'senior_living' ? 'al' :
+        f.facilityType === 'mixed' ? 'mixed' : '';
+      const stateClass = f.hasDashboard ? 'analyzed' : (f.source === 'discovered' || f.source === 'seed' ? 'discovered' : '');
       return L.divIcon({
         className: '',
-        html: `<div class="pin-pulse ${cls}"></div>`,
+        html: `<div class="pin-pulse ${typeClass} ${stateClass}"></div>`,
         iconSize: [22, 22],
         iconAnchor: [11, 11],
       });
@@ -107,10 +132,15 @@
 
     function popupHTML(f) {
       const loc = [f.city, f.state].filter(Boolean).join(', ') || '—';
+      const isAL = f.facilityType === 'senior_living';
+      const leftLabel = isAL ? 'Care' : 'Deal';
+      const rightLabel = isAL ? 'OpRisk' : 'Stab';
+      const leftVal = isAL ? f.careQuality : f.dealQuality;
+      const rightVal = isAL ? f.operatorRisk : f.entityStability;
       const scoresBlock = f.hasDashboard ? `
         <div class="pop-scores">
-          <div class="pop-score"><div class="label">Deal</div><div class="val">${f.dealQuality ?? '—'}</div></div>
-          <div class="pop-score"><div class="label">Stab</div><div class="val">${f.entityStability ?? '—'}</div></div>
+          <div class="pop-score"><div class="label">${leftLabel}</div><div class="val">${leftVal ?? '—'}</div></div>
+          <div class="pop-score"><div class="label">${rightLabel}</div><div class="val">${rightVal ?? '—'}</div></div>
         </div>` : '';
       const buttonLabel = f.hasChat ? 'Open chat →' : 'Start research chat →';
       return `

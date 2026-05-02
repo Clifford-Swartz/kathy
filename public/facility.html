@@ -189,6 +189,11 @@
       const npv = a.npv_analysis || {};
       const dq = scores.deal_quality || {};
       const es = scores.entity_stability || {};
+      const cq = scores.care_quality || {};
+      const or_ = scores.operator_risk || {};
+      const pricing = a.pricing || {};
+      const reg = a.regulatory_legal || {};
+      const valAn = a.value_analysis || {};
       const sources = a.field_sources || {};
       const confidence = a.field_confidence || {};
       const discrepancies = Array.isArray(a.discrepancies) ? a.discrepancies : [];
@@ -242,39 +247,81 @@
 
       if (id_.location) facLocEl.textContent = id_.location;
 
-      dashContent.innerHTML = `
+      // Panel-driven rendering: each block renders only if it has real data,
+      // so a CCRC dashboard, an AL dashboard, and a mixed-campus dashboard
+      // all use the same render path.
+
+      const hasCCRCScores = dq.score != null || es.score != null;
+      const hasALScores = cq.score != null || or_.score != null;
+
+      const headlineScoresHTML = `
         <div class="big-scores">
-          <div class="big-score">
-            <div class="label">Deal Quality</div>
-            <div class="val ${scoreClass(dq.score)}">${dq.score ?? '—'}</div>
-            <div class="rationale">${escapeHtml(dq.rationale || '')}</div>
-          </div>
-          <div class="big-score">
-            <div class="label">Entity Stability</div>
-            <div class="val ${scoreClass(es.score)}">${es.score ?? '—'}</div>
-            <div class="rationale">${escapeHtml(es.rationale || '')}</div>
-          </div>
-        </div>
-
-        ${id_.url || id_.operator || id_.parent_org ? `
-          <div class="panel">
-            <h3>Identity</h3>
-            <div class="kv">
-              ${id_.url ? `<div class="k">Website</div><div class="v"><a href="${escapeHtml(id_.url)}" target="_blank" rel="noopener">link ↗</a></div>` : ''}
-              ${id_.operator ? `<div class="k">Operator</div><div class="v">${escapeHtml(id_.operator)}</div>` : ''}
-              ${id_.parent_org ? `<div class="k">Parent org</div><div class="v">${escapeHtml(id_.parent_org)}</div>` : ''}
-              ${id_.year_opened ? `<div class="k">Year opened</div><div class="v">${id_.year_opened}</div>` : ''}
+          ${hasCCRCScores ? `
+            <div class="big-score">
+              <div class="label">Deal Quality</div>
+              <div class="val ${scoreClass(dq.score)}">${dq.score ?? '—'}</div>
+              <div class="rationale">${escapeHtml(dq.rationale || '')}</div>
             </div>
-          </div>` : ''}
+            <div class="big-score">
+              <div class="label">Entity Stability</div>
+              <div class="val ${scoreClass(es.score)}">${es.score ?? '—'}</div>
+              <div class="rationale">${escapeHtml(es.rationale || '')}</div>
+            </div>` : ''}
+          ${hasALScores ? `
+            <div class="big-score">
+              <div class="label">Care Quality</div>
+              <div class="val ${scoreClass(cq.score)}">${cq.score ?? '—'}</div>
+              <div class="rationale">${escapeHtml(cq.rationale || '')}</div>
+            </div>
+            <div class="big-score">
+              <div class="label">Operator Risk</div>
+              <div class="val ${scoreClass(or_.score)}">${or_.score ?? '—'}</div>
+              <div class="rationale">${escapeHtml(or_.rationale || '')}</div>
+            </div>` : ''}
+        </div>`;
 
+      const hasIdentity = id_.url || id_.operator || id_.parent_org || id_.ultimate_owner ||
+                          id_.year_opened || id_.license_type ||
+                          id_.capacity_il || id_.capacity_al || id_.capacity_mc;
+      const identityHTML = hasIdentity ? `
+        <div class="panel">
+          <h3>Identity</h3>
+          <div class="kv">
+            ${id_.url ? `<div class="k">Website</div><div class="v"><a href="${escapeHtml(id_.url)}" target="_blank" rel="noopener">link ↗</a></div>` : ''}
+            ${id_.license_type ? `<div class="k">License type</div><div class="v">${escapeHtml(id_.license_type)}</div>` : ''}
+            ${id_.operator ? `<div class="k">Operator</div><div class="v">${escapeHtml(id_.operator)}</div>` : ''}
+            ${id_.parent_org ? `<div class="k">Parent org</div><div class="v">${escapeHtml(id_.parent_org)}</div>` : ''}
+            ${id_.ultimate_owner ? `<div class="k">Ultimate owner</div><div class="v">${v(escapeHtml(id_.ultimate_owner), 'identity.ultimate_owner')}</div>` : ''}
+            ${id_.capacity_il ? `<div class="k">IL units</div><div class="v">${id_.capacity_il}</div>` : ''}
+            ${id_.capacity_al ? `<div class="k">AL units</div><div class="v">${id_.capacity_al}</div>` : ''}
+            ${id_.capacity_mc ? `<div class="k">MC units</div><div class="v">${id_.capacity_mc}</div>` : ''}
+            ${id_.year_opened ? `<div class="k">Year opened</div><div class="v">${id_.year_opened}</div>` : ''}
+          </div>
+          ${Array.isArray(id_.ownership_history) && id_.ownership_history.length ? `
+            <div style="margin-top:0.85rem; padding-top:0.7rem; border-top:1px dashed var(--border)">
+              <div style="font-family:-apple-system,sans-serif; font-size:0.7rem; text-transform:uppercase; letter-spacing:0.05em; color:var(--muted); margin-bottom:0.35rem">Ownership history</div>
+              <div style="font-family:-apple-system,sans-serif; font-size:0.85rem; color:var(--ink-soft); line-height:1.55">
+                ${id_.ownership_history.map(h => `<div>${h.year ?? '?'} — <strong>${escapeHtml(h.owner || '')}</strong>${h.event ? ` <span style="color:var(--muted)">(${escapeHtml(h.event)})</span>` : ''}</div>`).join('')}
+              </div>
+            </div>` : ''}
+        </div>` : '';
+
+      // CCRC contract panel
+      const contractHTML = (con.type || con.summary) ? `
         <div class="panel">
           <h3>Contract</h3>
           <div class="kv">
-            <div class="k">Type</div><div class="v">${escapeHtml(con.type || '—')}</div>
+            <div class="k">Type</div><div class="v">${v(escapeHtml(con.type || '—'), 'contract.type')}</div>
           </div>
           ${con.summary ? `<p style="font-family:-apple-system,sans-serif; font-size:0.85rem; margin-top:0.5rem">${escapeHtml(con.summary)}</p>` : ''}
-        </div>
+        </div>` : '';
 
+      // CCRC financial snapshot
+      const hasFinancial = fin.entrance_fee_low != null || fin.entrance_fee_high != null ||
+                           fin.monthly_fee_low != null || fin.days_cash_on_hand != null ||
+                           fin.debt_to_asset != null || fin.operating_margin != null ||
+                           fin.debt_service_coverage != null || fin.occupancy_rate != null;
+      const financialHTML = hasFinancial ? `
         <div class="panel">
           <h3>Financial snapshot</h3>
           <div class="kv">
@@ -292,42 +339,132 @@
               <div style="font-family:-apple-system,sans-serif; font-size:0.7rem; text-transform:uppercase; letter-spacing:0.05em; color:var(--muted); margin-bottom:0.35rem">Occupancy history</div>
               <div style="font-family:-apple-system,sans-serif; font-size:0.85rem; color:var(--ink); line-height:1.6">${fmtOccHistory(fin.occupancy_history)}</div>
             </div>` : ''}
-        </div>
+        </div>` : '';
 
-        ${(npv.total_cost_10yr != null || npv.total_cost_20yr != null) ? `
-          <div class="panel">
-            <h3>NPV</h3>
-            <div class="kv">
-              <div class="k">10-yr cost</div><div class="v">${fmtMoney(npv.total_cost_10yr)}</div>
-              <div class="k">20-yr cost</div><div class="v">${fmtMoney(npv.total_cost_20yr)}</div>
-            </div>
-          </div>` : ''}
+      // CCRC NPV
+      const npvHTML = (npv.total_cost_10yr != null || npv.total_cost_20yr != null) ? `
+        <div class="panel">
+          <h3>NPV</h3>
+          <div class="kv">
+            <div class="k">10-yr cost</div><div class="v">${fmtMoney(npv.total_cost_10yr)}</div>
+            <div class="k">20-yr cost</div><div class="v">${fmtMoney(npv.total_cost_20yr)}</div>
+          </div>
+        </div>` : '';
 
+      // AL pricing panel
+      const hasPricing = pricing.base_monthly_low != null || pricing.base_monthly_high != null ||
+                         pricing.memory_care_base != null ||
+                         (Array.isArray(pricing.care_level_upcharges) && pricing.care_level_upcharges.length);
+      const pricingHTML = hasPricing ? `
+        <div class="panel">
+          <h3>Pricing</h3>
+          <div class="kv">
+            <div class="k">Base monthly</div><div class="v">${v(fmtRange(pricing.base_monthly_low, pricing.base_monthly_high), 'pricing.base_monthly_low')}</div>
+            ${pricing.memory_care_base != null ? `<div class="k">Memory care</div><div class="v">${v(fmtMoney(pricing.memory_care_base), 'pricing.memory_care_base')}</div>` : ''}
+            ${pricing.community_fee != null ? `<div class="k">Community fee</div><div class="v">${v(fmtMoney(pricing.community_fee), 'pricing.community_fee')}</div>` : ''}
+          </div>
+          ${Array.isArray(pricing.care_level_upcharges) && pricing.care_level_upcharges.length ? `
+            <div style="margin-top:0.85rem; padding-top:0.7rem; border-top:1px dashed var(--border)">
+              <div style="font-family:-apple-system,sans-serif; font-size:0.7rem; text-transform:uppercase; letter-spacing:0.05em; color:var(--muted); margin-bottom:0.4rem">Care-level upcharges</div>
+              ${pricing.care_level_upcharges.map(u => `
+                <div style="font-family:-apple-system,sans-serif; font-size:0.85rem; display:flex; justify-content:space-between; padding:0.2rem 0">
+                  <span>${escapeHtml(u.level || '')}</span>
+                  <span style="font-weight:500">${u.monthly_addition != null ? '+' + fmtMoney(u.monthly_addition) + '/mo' : (u.notes || '—')}</span>
+                </div>`).join('')}
+            </div>` : ''}
+          ${Array.isArray(pricing.fee_escalation_history_pct) && pricing.fee_escalation_history_pct.length ? `
+            <div style="margin-top:0.85rem; padding-top:0.7rem; border-top:1px dashed var(--border)">
+              <div style="font-family:-apple-system,sans-serif; font-size:0.7rem; text-transform:uppercase; letter-spacing:0.05em; color:var(--muted); margin-bottom:0.35rem">Rate escalation history</div>
+              <div style="font-family:-apple-system,sans-serif; font-size:0.85rem; color:var(--ink); line-height:1.6">${pricing.fee_escalation_history_pct.map(p => p.toFixed(1) + '%').join(' &middot; ')}</div>
+            </div>` : ''}
+        </div>` : '';
+
+      // Care quality — handle both CCRC (medicare stars) and AL (deficiencies)
+      const hasCCRCCare = care.medicare_star_rating != null || care.carf_accredited != null;
+      const hasALCare = care.most_recent_inspection_date || care.deficiency_count_3yr != null ||
+                        care.license_status || (Array.isArray(care.deficiencies_recent) && care.deficiencies_recent.length);
+      const careHTML = (hasCCRCCare || hasALCare) ? `
         <div class="panel">
           <h3>Care quality</h3>
           <div class="kv">
-            <div class="k">Medicare ★</div><div class="v">${care.medicare_star_rating ?? '—'}</div>
-            <div class="k">CARF</div><div class="v">${care.carf_accredited == null ? '—' : (care.carf_accredited ? 'Yes' : 'No')}</div>
+            ${care.medicare_star_rating != null ? `<div class="k">Medicare ★ (SNF)</div><div class="v">${v(care.medicare_star_rating, 'care_quality.medicare_star_rating')}</div>` : ''}
+            ${care.carf_accredited != null ? `<div class="k">CARF</div><div class="v">${care.carf_accredited ? 'Yes' : 'No'}</div>` : ''}
+            ${care.most_recent_inspection_date ? `<div class="k">Last inspection</div><div class="v">${v(escapeHtml(care.most_recent_inspection_date), 'care_quality.most_recent_inspection_date')}</div>` : ''}
+            ${care.license_status ? `<div class="k">License status</div><div class="v">${v(escapeHtml(care.license_status), 'care_quality.license_status')}</div>` : ''}
+            ${care.deficiency_count_3yr != null ? `<div class="k">Deficiencies (3yr)</div><div class="v">${v(care.deficiency_count_3yr, 'care_quality.deficiency_count_3yr')}</div>` : ''}
+            ${care.complaint_volume != null ? `<div class="k">Complaints</div><div class="v">${v(care.complaint_volume, 'care_quality.complaint_volume')}</div>` : ''}
+            ${care.staff_turnover_pct != null ? `<div class="k">Staff turnover</div><div class="v">${v(care.staff_turnover_pct + '%', 'care_quality.staff_turnover_pct')}</div>` : ''}
+            ${care.direct_care_staffing ? `<div class="k">Staffing ratio</div><div class="v">${escapeHtml(care.direct_care_staffing)}</div>` : ''}
           </div>
-        </div>
+          ${care.repeat_deficiency_pattern ? `<p style="font-family:-apple-system,sans-serif; font-size:0.85rem; color:var(--bad); margin-top:0.7rem; padding-top:0.5rem; border-top:1px dashed var(--border)">⚑ ${escapeHtml(care.repeat_deficiency_pattern)}</p>` : ''}
+          ${Array.isArray(care.deficiencies_recent) && care.deficiencies_recent.length ? `
+            <div style="margin-top:0.85rem; padding-top:0.7rem; border-top:1px dashed var(--border)">
+              <div style="font-family:-apple-system,sans-serif; font-size:0.7rem; text-transform:uppercase; letter-spacing:0.05em; color:var(--muted); margin-bottom:0.4rem">Recent deficiencies</div>
+              ${care.deficiencies_recent.slice(0, 6).map(d => `
+                <div style="font-family:-apple-system,sans-serif; font-size:0.82rem; padding:0.3rem 0; border-bottom:1px dotted var(--border)">
+                  <div><strong>${escapeHtml(d.date || '')}</strong> · ${escapeHtml(d.severity || '?')}${d.resolved === false ? ' · <span style="color:var(--bad)">unresolved</span>' : ''}</div>
+                  <div style="color:var(--ink-soft)">${escapeHtml(d.description || d.category || '')}</div>
+                </div>`).join('')}
+            </div>` : ''}
+        </div>` : '';
 
-        ${(a.red_flags?.length || a.highlights?.length) ? `
-          <div class="panel">
-            <h3>Flags</h3>
-            <div class="flags">
-              ${(a.red_flags || []).map(s => `<div class="flag red">⚑ ${escapeHtml(s)}</div>`).join('')}
-              ${(a.highlights || []).map(s => `<div class="flag green">★ ${escapeHtml(s)}</div>`).join('')}
-            </div>
-          </div>` : ''}
+      // AL regulatory & legal
+      const hasReg = reg.medicaid_waiver_accepted != null ||
+                     (Array.isArray(reg.recent_regulatory_actions) && reg.recent_regulatory_actions.length) ||
+                     (Array.isArray(reg.pending_litigation) && reg.pending_litigation.length) ||
+                     (Array.isArray(reg.recent_class_actions_against_operator) && reg.recent_class_actions_against_operator.length);
+      const regHTML = hasReg ? `
+        <div class="panel">
+          <h3>Regulatory &amp; legal</h3>
+          <div class="kv">
+            ${reg.medicaid_waiver_accepted != null ? `<div class="k">Medicaid waiver</div><div class="v">${reg.medicaid_waiver_accepted ? 'Accepted' : 'Not accepted'}</div>` : ''}
+          </div>
+          ${Array.isArray(reg.recent_regulatory_actions) && reg.recent_regulatory_actions.length ? `
+            <div style="margin-top:0.7rem"><div style="font-family:-apple-system,sans-serif; font-size:0.7rem; text-transform:uppercase; letter-spacing:0.05em; color:var(--muted); margin-bottom:0.35rem">Regulatory actions</div>
+              <ul style="font-family:-apple-system,sans-serif; font-size:0.83rem; padding-left:1.1rem; margin:0; color:var(--ink-soft)">${reg.recent_regulatory_actions.map(s => `<li>${escapeHtml(s)}</li>`).join('')}</ul></div>` : ''}
+          ${Array.isArray(reg.pending_litigation) && reg.pending_litigation.length ? `
+            <div style="margin-top:0.7rem"><div style="font-family:-apple-system,sans-serif; font-size:0.7rem; text-transform:uppercase; letter-spacing:0.05em; color:var(--muted); margin-bottom:0.35rem">Pending litigation</div>
+              <ul style="font-family:-apple-system,sans-serif; font-size:0.83rem; padding-left:1.1rem; margin:0; color:var(--ink-soft)">${reg.pending_litigation.map(s => `<li>${escapeHtml(s)}</li>`).join('')}</ul></div>` : ''}
+          ${Array.isArray(reg.recent_class_actions_against_operator) && reg.recent_class_actions_against_operator.length ? `
+            <div style="margin-top:0.7rem"><div style="font-family:-apple-system,sans-serif; font-size:0.7rem; text-transform:uppercase; letter-spacing:0.05em; color:var(--muted); margin-bottom:0.35rem">Class actions vs operator</div>
+              <ul style="font-family:-apple-system,sans-serif; font-size:0.83rem; padding-left:1.1rem; margin:0; color:var(--ink-soft)">${reg.recent_class_actions_against_operator.map(s => `<li>${escapeHtml(s)}</li>`).join('')}</ul></div>` : ''}
+        </div>` : '';
 
-        ${a.sources?.length ? `
-          <div class="panel">
-            <h3>Sources</h3>
-            <ul class="sources" style="padding-left:1.1rem; margin:0">
-              ${a.sources.map(s => `<li><a href="${escapeHtml(s.url)}" target="_blank" rel="noopener">${escapeHtml(s.title || s.url)}</a></li>`).join('')}
-            </ul>
-          </div>` : ''}
-      `;
+      // AL value analysis
+      const hasValAn = valAn.moderate_needs_total_monthly != null ||
+                       valAn.local_market_median_monthly != null ||
+                       valAn['5yr_projected_total'] != null;
+      const valAnHTML = hasValAn ? `
+        <div class="panel">
+          <h3>Value analysis</h3>
+          <div class="kv">
+            ${valAn.moderate_needs_total_monthly != null ? `<div class="k">Moderate needs / mo</div><div class="v">${fmtMoney(valAn.moderate_needs_total_monthly)}</div>` : ''}
+            ${valAn.local_market_median_monthly != null ? `<div class="k">Local median / mo</div><div class="v">${fmtMoney(valAn.local_market_median_monthly)}</div>` : ''}
+            ${valAn['5yr_projected_total'] != null ? `<div class="k">5-yr total</div><div class="v">${fmtMoney(valAn['5yr_projected_total'])}</div>` : ''}
+          </div>
+          ${valAn.value_vs_market ? `<p style="font-family:-apple-system,sans-serif; font-size:0.85rem; margin-top:0.5rem">${escapeHtml(valAn.value_vs_market)}</p>` : ''}
+          ${valAn.vs_in_home_care_alternative ? `<p style="font-family:-apple-system,sans-serif; font-size:0.85rem; color:var(--ink-soft); margin-top:0.4rem">vs. in-home care: ${escapeHtml(valAn.vs_in_home_care_alternative)}</p>` : ''}
+        </div>` : '';
+
+      const flagsHTML = (a.red_flags?.length || a.highlights?.length) ? `
+        <div class="panel">
+          <h3>Flags</h3>
+          <div class="flags">
+            ${(a.red_flags || []).map(s => `<div class="flag red">⚑ ${escapeHtml(s)}</div>`).join('')}
+            ${(a.highlights || []).map(s => `<div class="flag green">★ ${escapeHtml(s)}</div>`).join('')}
+          </div>
+        </div>` : '';
+
+      const sourcesHTML = a.sources?.length ? `
+        <div class="panel">
+          <h3>Sources</h3>
+          <ul class="sources" style="padding-left:1.1rem; margin:0">
+            ${a.sources.map(s => `<li><a href="${escapeHtml(s.url)}" target="_blank" rel="noopener">${escapeHtml(s.title || s.url)}</a></li>`).join('')}
+          </ul>
+        </div>` : '';
+
+      dashContent.innerHTML = headlineScoresHTML + identityHTML + contractHTML + financialHTML +
+                              pricingHTML + careHTML + regHTML + valAnHTML + npvHTML + flagsHTML + sourcesHTML;
     }
 
     composer.addEventListener('submit', async (e) => {
